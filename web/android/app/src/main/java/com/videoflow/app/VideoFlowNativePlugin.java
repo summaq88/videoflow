@@ -42,6 +42,8 @@ public class VideoFlowNativePlugin extends Plugin {
     private final ExecutorService pool = Executors.newCachedThreadPool();
     private volatile boolean ready = false;
     private volatile String initError = null;
+    private volatile boolean updating = false;
+    private static final long UPDATE_EVERY_MS = 12L * 3600_000L;
 
     @Override
     public void load() {
@@ -49,11 +51,42 @@ public class VideoFlowNativePlugin extends Plugin {
             try {
                 YoutubeDL.getInstance().init(getContext());
                 FFmpeg.getInstance().init(getContext());
-                ready = true;
             } catch (Throwable e) {
                 initError = String.valueOf(e.getMessage());
+                return;
             }
+            // Sites like YouTube change often: keep yt-dlp current automatically (needs internet, runs in background).
+            android.content.SharedPreferences prefs = getContext().getSharedPreferences("videoflow", Context.MODE_PRIVATE);
+            long last = prefs.getLong("lastEngineUpdate", 0);
+            if (System.currentTimeMillis() - last > UPDATE_EVERY_MS) {
+                updating = true;
+                try {
+                    YoutubeDL.getInstance().updateYoutubeDL(getContext(), YoutubeDL.UpdateChannel.STABLE.INSTANCE);
+                    prefs.edit().putLong("lastEngineUpdate", System.currentTimeMillis()).apply();
+                } catch (Throwable ignored) {
+                    // offline or GitHub unreachable: keep the current engine, try again next launch
+                } finally {
+                    updating = false;
+                }
+            }
+            ready = true;
         });
+    }
+
+    /** Path of the bundled QuickJS interpreter (YouTube needs a JavaScript runtime to unlock video links). */
+    private String jsRuntime() {
+        File qjs = new File(getContext().getApplicationInfo().nativeLibraryDir, "libqjs.so");
+        return qjs.exists() ? qjs.getAbsolutePath() : null;
+    }
+
+    /** Options shared by every yt-dlp call. attempt > 0 = fallback strategies after an HTTP 403. */
+    private void addCommon(YoutubeDLRequest req, int attempt) {
+        String qjs = jsRuntime();
+        if (qjs != null) req.addOption("--js-runtimes", "quickjs:" + qjs);
+        req.addOption("--remote-components", "ejs:github");
+        req.addOption("--no-playlist");
+        if (attempt == 1) req.addOption("--extractor-args", "youtube:player_client=android,tv,web_safari");
+        if (attempt >= 2) req.addOption("--extractor-args", "youtube:player_client=tv,web_embedded,mweb");
     }
 
     /** Waits (in a worker thread) until the engine has unpacked itself on first launch. */
@@ -74,6 +107,7 @@ public class VideoFlowNativePlugin extends Plugin {
             if (!waitReady(call)) return;
             JSObject r = new JSObject();
             r.put("ready", true);
+            r.put("jsRuntime", jsRuntime() != null);
             try { r.put("version", YoutubeDL.getInstance().versionName(getContext())); } catch (Throwable e) { r.put("version", ""); }
             call.resolve(r);
         });
@@ -88,8 +122,8 @@ public class VideoFlowNativePlugin extends Plugin {
             try {
                 YoutubeDLRequest req = new YoutubeDLRequest(url);
                 req.addOption("--dump-single-json");
-                req.addOption("--no-playlist");
                 req.addOption("--no-warnings");
+                addCommon(req, 0);
                 YoutubeDLResponse res = YoutubeDL.getInstance().execute(req, null, (Function3<Float, Long, String, Unit>) null);
                 JSObject r = new JSObject();
                 r.put("json", res.getOut());
@@ -114,6 +148,7 @@ public class VideoFlowNativePlugin extends Plugin {
         final String kind = call.getString("kind", "video");
         final String container = call.getString("container", "mp4");
         final String tag = call.getString("tag", "best");
+        final int attempt = call.getInt("attempt", 0);
         if (id == null || url == null) { call.reject("Missing id or url"); return; }
         call.setKeepAlive(true);
         pool.execute(() -> {
@@ -122,10 +157,11 @@ public class VideoFlowNativePlugin extends Plugin {
             dir.mkdirs();
             try {
                 YoutubeDLRequest req = new YoutubeDLRequest(url);
-                req.addOption("-f", format);
+                // Last resort: a single-file format (needs no merging and is rarely blocked).
+                req.addOption("-f", attempt >= 2 && !"audio".equals(kind) ? "18/b/" + format : format);
+                addCommon(req, attempt);
                 req.addOption("-o", dir.getAbsolutePath() + "/%(extractor_key)s_%(title).80B_%(id)s_" + tag + ".%(ext)s");
                 req.addOption("--restrict-filenames");
-                req.addOption("--no-playlist");
                 req.addOption("--no-mtime");
                 req.addOption("--newline");
                 req.addOption("--retries", "5");
