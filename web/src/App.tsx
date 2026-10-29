@@ -23,6 +23,11 @@ export default function App() {
   const [prefill, setPrefill] = useState<string | null>(null);
   const [clipOffer, setClipOffer] = useState<string | null>(null);
   const lastClip = useRef('');
+  const mine = useRef<string[]>([]); // downloads started in this visit
+  const saved = useRef(new Set<string>());
+  const autoSaveRef = useRef(s.autoSave);
+  autoSaveRef.current = s.autoSave;
+  const saveRef = useRef<(id: string, name: string) => void>(() => {});
 
   const t = dict[s.lang];
   const client = useMemo(() => api(s), [s.serverUrl, s.token]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -57,25 +62,33 @@ export default function App() {
     return () => { alive = false; };
   }, [client]);
 
-  // Live job updates via Server-Sent Events (auto-reconnects)
+  // Live job updates: Server-Sent Events from the server, or events from the built-in engine (Android app)
   useEffect(() => {
     if (!health) return;
     client.jobs().then((r) => setJobs(Object.fromEntries(r.jobs.map((j) => [j.id, j])))).catch(() => {});
+    const onJob = (j: Job) => {
+      if (client.mode === 'server' && j.status === 'completed' && mine.current.includes(j.id) && !saved.current.has(j.id) && autoSaveRef.current) {
+        saved.current.add(j.id);
+        saveRef.current(j.id, j.fileName || 'video');
+      }
+      setJobs((prev) => {
+        const before = prev[j.id];
+        if (before && before.status !== j.status && ['completed', 'failed', 'skipped', 'canceled'].includes(j.status)) {
+          setHistoryKey((k) => k + 1);
+        }
+        return { ...prev, [j.id]: j };
+      });
+    };
+    if (client.mode === 'device') {
+      const off = client.subscribe(onJob);
+      return () => { off(); };
+    }
     const es = new EventSource(client.eventsUrl());
     es.addEventListener('snapshot', (e) => {
       const list = JSON.parse((e as MessageEvent).data) as Job[];
       setJobs((prev) => ({ ...prev, ...Object.fromEntries(list.map((j) => [j.id, j])) }));
     });
-    es.addEventListener('job', (e) => {
-      const j = JSON.parse((e as MessageEvent).data) as Job;
-      setJobs((prev) => {
-        const before = prev[j.id];
-        if (before && before.status !== j.status && ['completed', 'failed', 'skipped'].includes(j.status)) {
-          setHistoryKey((k) => k + 1);
-        }
-        return { ...prev, [j.id]: j };
-      });
-    });
+    es.addEventListener('job', (e) => onJob(JSON.parse((e as MessageEvent).data) as Job));
     return () => es.close();
   }, [client, health]);
 
@@ -108,6 +121,7 @@ export default function App() {
 
   const save = useCallback(async (id: string, name: string) => {
     try {
+      if (client.mode === 'device') { await client.share(id); return; } // already saved in Download/VideoFlow → share it
       const where = await saveToDevice(client.fileUrl(id, true), name);
       toast(where ? t.savedTo(where) : t.saving);
     } catch (e) {
@@ -115,7 +129,12 @@ export default function App() {
     }
   }, [client, t, toast]);
 
-  const play = useCallback((id: string, title: string, kind: string) => setPlayer({ id, title, kind }), []);
+  saveRef.current = save;
+
+  const play = useCallback((id: string, title: string, kind: string) => {
+    if (client.mode === 'device') { client.open(id).catch((e) => toast(e instanceof Error ? e.message : String(e), 'err')); return; }
+    setPlayer({ id, title, kind });
+  }, [client, toast]);
 
   const tabs: { id: Tab; icon: string; label: string; badge?: number }[] = [
     { id: 'home', icon: 'home', label: t.home },
@@ -140,7 +159,12 @@ export default function App() {
                 </button>
               ))}
             </nav>
-            {!health && (
+            {!health && client.mode === 'device' && (
+              <span className="ms-auto flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500" />{t.preparing}
+              </span>
+            )}
+            {!health && client.mode === 'server' && (
               <button onClick={() => setTab('settings')} className="ms-auto flex items-center gap-1.5 rounded-full bg-red-50 px-2.5 py-1 text-xs font-medium text-red-600 md:ms-2 dark:bg-red-500/10 dark:text-red-400">
                 <span className="h-1.5 w-1.5 rounded-full bg-red-500" />{t.notConnected}
               </button>
@@ -157,7 +181,9 @@ export default function App() {
               <button onClick={() => setClipOffer(null)} aria-label={t.cancel}><Icon name="x" className="h-4 w-4" /></button>
             </div>
           )}
-          {tab === 'home' && <Home client={client} health={health} prefill={prefill} onPrefillUsed={() => setPrefill(null)} onQueued={() => setTab('downloads')} />}
+          {tab === 'home' && <Home client={client} health={health} prefill={prefill} onPrefillUsed={() => setPrefill(null)}
+            onQueued={(ids) => { mine.current = [...ids, ...mine.current].slice(0, 20); setJobs((p) => ({ ...p })); }}
+            myJobs={mine.current.map((id) => jobs[id]).filter(Boolean).slice(0, 6)} onSave={save} />}
           {tab === 'downloads' && <Downloads jobs={jobList} client={client} onPlay={play} onSave={save} />}
           {tab === 'history' && <History client={client} refreshKey={historyKey} onPlay={play} onSave={save} onOpenLink={(u) => { setPrefill(u); setTab('home'); }} />}
           {tab === 'settings' && <SettingsPage health={health} onHealth={setHealth} />}
