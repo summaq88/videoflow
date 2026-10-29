@@ -22,6 +22,9 @@ export default function Home({ client, health, prefill, onPrefillUsed, onQueued,
   const [container, setContainer] = useState<'mp4' | 'webm'>(s.defaultContainer);
   const [sending, setSending] = useState(false);
   const [dupOpen, setDupOpen] = useState(false);
+  const [refining, setRefining] = useState(false);
+  const [refineNote, setRefineNote] = useState<string | null>(null);
+  const detectId = useRef(0);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   const urls = useMemo(() => findUrls(text), [text]);
@@ -57,13 +60,32 @@ export default function Home({ client, health, prefill, onPrefillUsed, onQueued,
     const list = findUrls(value);
     if (!list.length) { setError(t.placeholder); return; }
     if (list.length > 1) return; // batch mode shows its own card
-    setBusy(true); setError(null); setRes(null);
+    const reqId = ++detectId.current;
+    setBusy(true); setError(null); setRes(null); setRefining(false); setRefineNote(null);
     try {
-      setRes(await client.analyze(list[0]));
+      // Android app: show title + thumbnail instantly, load exact qualities in the background.
+      if (client.mode === 'device') {
+        const quick = await client.preview(list[0]).catch(() => null);
+        if (reqId !== detectId.current) return;
+        if (quick) {
+          setRes(quick);
+          setBusy(false);
+          if (quick.partial) {
+            setRefining(true);
+            client.analyze(list[0])
+              .then((full) => { if (reqId === detectId.current) setRes(full); })
+              .catch((e) => { if (reqId === detectId.current) setRefineNote(e instanceof ApiError ? e.message : String(e)); })
+              .finally(() => { if (reqId === detectId.current) setRefining(false); });
+          }
+          return;
+        }
+      }
+      const full = await client.analyze(list[0]);
+      if (reqId === detectId.current) setRes(full);
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
+      if (reqId === detectId.current) setError(e instanceof ApiError ? e.message : String(e));
     } finally {
-      setBusy(false);
+      if (reqId === detectId.current) setBusy(false);
     }
   }
 
@@ -73,6 +95,8 @@ export default function Home({ client, health, prefill, onPrefillUsed, onQueued,
     try {
       const r = await client.download({ url: res.url, kind: audio ? 'audio' : 'video', quality: audio ? 'audio' : quality, container, force });
       onQueued([r.job.id]);
+      detectId.current++; // ignore late quality results for this link
+      setRefining(false); setRefineNote(null);
       setRes(null);
       setText('');
     } catch (e) {
@@ -116,7 +140,7 @@ export default function Home({ client, health, prefill, onPrefillUsed, onQueued,
             ref={inputRef}
             value={text}
             rows={isBatch ? Math.min(6, urls.length + 1) : 1}
-            onChange={(e) => { setText(e.target.value); setRes(null); setError(null); }}
+            onChange={(e) => { detectId.current++; setText(e.target.value); setRes(null); setError(null); setBusy(false); setRefining(false); }}
             onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !isBatch) { e.preventDefault(); void detect(); } }}
             placeholder={t.placeholder}
             dir="ltr"
@@ -184,6 +208,10 @@ export default function Home({ client, health, prefill, onPrefillUsed, onQueued,
               <span className="inline-block rounded-md bg-brand-50 px-2 py-0.5 text-[11px] font-semibold text-brand-700 dark:bg-brand-500/15 dark:text-brand-400">{res.platform.name}</span>
               <h2 className="mt-1.5 line-clamp-3 text-base font-semibold leading-snug" dir="auto">{info.title}</h2>
               {info.uploader && <p className="mt-1 truncate text-sm text-slate-500 dark:text-slate-400" dir="auto">{t.by} {info.uploader}</p>}
+              {refining && (
+                <p className="mt-2 flex items-center gap-1.5 text-xs text-slate-500"><span className="h-3 w-3 animate-spin rounded-full border-2 border-slate-300 border-t-brand-500" />{t.checkingQualities}</p>
+              )}
+              {!refining && refineNote && <p className="mt-2 text-xs text-amber-600">{refineNote}</p>}
               {res.alreadyDownloaded && (
                 <p className="mt-2 flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400"><Icon name="check" className="h-4 w-4" />{t.alreadyHave}</p>
               )}
