@@ -6,9 +6,9 @@ import { EngineError, PLATFORMS, GENERIC, buildFormat, detectPlatform, friendlyE
 
 interface NativeResult { name: string; size: number; mime: string; uri: string; path: string }
 interface NativePlugin {
-  status(): Promise<{ ready: boolean; version: string }>;
+  status(): Promise<{ ready: boolean; version: string; jsRuntime?: boolean }>;
   info(o: { url: string }): Promise<{ json: string }>;
-  download(o: { id: string; url: string; format: string; kind: string; container: string; tag: string }): Promise<NativeResult>;
+  download(o: { id: string; url: string; format: string; kind: string; container: string; tag: string; attempt: number }): Promise<NativeResult>;
   stop(o: { id: string; keep: boolean }): Promise<void>;
   update(): Promise<{ status: string; version: string }>;
   open(o: { uri: string; mime: string }): Promise<void>;
@@ -32,7 +32,7 @@ const saveHistory = (h: Stored[]) => { try { localStorage.setItem(HKEY, JSON.str
 const UNITS: Record<string, number> = { B: 1, KiB: 1024, MiB: 1024 ** 2, GiB: 1024 ** 3, KB: 1e3, MB: 1e6, GB: 1e9 };
 const toBytes = (n: string, u: string) => Number(n) * (UNITS[u] || 1);
 
-type Live = Job & { videoKey: string | null; platformObj: Platform; info: VideoInfo | null; attempts: number; force: boolean };
+type Live = Job & { videoKey: string | null; platformObj: Platform; info: VideoInfo | null; attempts: number; force: boolean; strategy: number };
 
 function wrap(e: unknown): ApiError {
   if (e instanceof ApiError) return e;
@@ -76,7 +76,7 @@ class DeviceClient {
   }
 
   private view(j: Live): Job {
-    const { platformObj, info, attempts, force, ...rest } = j; // eslint-disable-line @typescript-eslint/no-unused-vars
+    const { platformObj, info, attempts, force, strategy, ...rest } = j; // eslint-disable-line @typescript-eslint/no-unused-vars
     return rest;
   }
 
@@ -150,7 +150,7 @@ class DeviceClient {
       videoKey: info?.videoKey || null, title: info?.title || null, uploader: info?.uploader || null,
       thumbnail: info?.thumbnail || null, duration: info?.duration ?? null,
       kind, quality, container, status: 'queued', progress: null, downloaded: 0, total: null, speed: null, eta: null,
-      fileName: null, fileSize: null, error: null, errorCode: null, createdAt: Date.now(), attempts: 0, force: Boolean(b.force),
+      fileName: null, fileSize: null, error: null, errorCode: null, createdAt: Date.now(), attempts: 0, force: Boolean(b.force), strategy: 0,
     } as Live;
     this.jobMap.set(j.id, j);
     this.queue.push(j.id);
@@ -218,7 +218,7 @@ class DeviceClient {
       this.update(j, { status: 'downloading', error: null, errorCode: null });
       const tag = j.kind === 'audio' ? 'audio' : (j.quality === 'best' ? 'best' : `${j.quality}p`);
       const r = await Native.download({
-        id: j.id, url: j.url, kind: j.kind, container: j.container, tag,
+        id: j.id, url: j.url, kind: j.kind, container: j.container, tag, attempt: j.strategy,
         format: buildFormat({ quality: j.quality, container: j.container, kind: j.kind, clean: j.platformObj.clean }),
       });
       this.update(j, { status: 'completed', progress: 100, speed: null, eta: null, fileName: r.name, fileSize: r.size });
@@ -226,6 +226,14 @@ class DeviceClient {
     } catch (e) {
       const code = (e as { code?: string })?.code;
       if (j.status === 'paused' || j.status === 'canceled' || code === 'CANCELED') return;
+      const raw = (e as { message?: string })?.message || '';
+      // YouTube "403 Forbidden": try other ways of fetching the video before giving up.
+      if (/\b403\b|forbidden/i.test(raw) && j.strategy < 2) {
+        j.strategy++;
+        this.update(j, { status: 'queued', error: `Trying another method (${j.strategy}/2)…`, progress: null });
+        if (j.status === 'queued') this.queue.push(j.id);
+        return;
+      }
       const w = wrap(e);
       if (w.code === 'NETWORK' && j.attempts < 2) {
         j.attempts++;
@@ -261,7 +269,7 @@ class DeviceClient {
       if (!h) throw new ApiError('NOT_FOUND', 'Download not found.', 404);
       const u = parseUrl(h.url);
       j = { ...(h as unknown as Live), platformObj: detectPlatform(u), info: null, attempts: 0, force: true, fileName: null, fileSize: null,
-        createdAt: h.created_at, progress: null, downloaded: 0, total: null, speed: null, eta: null, errorCode: null, videoKey: h.video_key || null } as Live;
+        createdAt: h.created_at, strategy: 0, progress: null, downloaded: 0, total: null, speed: null, eta: null, errorCode: null, videoKey: h.video_key || null } as Live;
       this.jobMap.set(id, j);
     }
     if (!j) throw new ApiError('NOT_FOUND', 'Download not found.', 404);
@@ -281,7 +289,7 @@ class DeviceClient {
       await Native.stop({ id, keep: false });
       this.record(j);
     } else {
-      this.update(j, { status: 'queued', error: null, errorCode: null, attempts: 0, progress: null, force: true });
+      this.update(j, { status: 'queued', error: null, errorCode: null, attempts: 0, strategy: 0, progress: null, force: true });
       this.queue.push(id);
       this.pump();
     }

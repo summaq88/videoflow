@@ -109,6 +109,7 @@ export function friendlyError(msg = ''): EngineError {
   if (/drm|widevine/.test(s)) return new EngineError('DRM', 'This video is DRM-protected. Protected content cannot be downloaded.');
   if (/private video|this account is private|is private|protected tweet/.test(s)) return new EngineError('PRIVATE', 'This video is private. Only public videos can be downloaded.');
   if (/sign in|log ?in|login required|cookies|not a bot|rate-limit/.test(s)) return new EngineError('LOGIN_REQUIRED', 'The platform asked for a login or bot check for this video. Try again later, or try Settings → Update engine.');
+  if (/\b403\b|forbidden/.test(s)) return new EngineError('FORBIDDEN', 'The site refused this download (403). Open Settings → Update engine, then tap Retry.');
   if (/unsupported url/.test(s)) return new EngineError('UNSUPPORTED', 'This website or link type is not supported.');
   if (/no video formats|no video could be found|there is no video|requested format is not available/.test(s)) return new EngineError('NO_VIDEO', 'No downloadable video was found at this link (or not in the chosen quality).');
   if (/video unavailable|has been removed|not available|404|does not exist|deleted/.test(s)) return new EngineError('UNAVAILABLE', 'This video is unavailable – it may have been deleted or blocked in your region.');
