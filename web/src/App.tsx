@@ -109,7 +109,14 @@ export default function App() {
     return () => { window.removeEventListener('focus', check); document.removeEventListener('visibilitychange', check); };
   }, [s.clipboardWatch]);
 
-  // Android "Share → VideoFlow" support: ?url=... or ?text=...
+  // Android app: links shared from YouTube/TikTok/Instagram via "Share → VideoFlow"
+  useEffect(() => {
+    if (client.mode !== 'device') return;
+    client.takeShared().then((txt) => { if (txt && findUrls(txt).length) { setPrefill(txt); setTab('home'); } });
+    client.onShared((txt) => { if (findUrls(txt).length) { setPrefill(txt); setTab('home'); } });
+  }, [client]);
+
+  // Browser: ?url=... or ?text=...
   useEffect(() => {
     const p = new URLSearchParams(location.search);
     const shared = p.get('url') || p.get('text');
