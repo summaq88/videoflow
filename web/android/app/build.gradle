@@ -7,8 +7,8 @@ android {
         applicationId "com.videoflow.app"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 2
-        versionName "2.0"
+        versionCode 3
+        versionName "2.1"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         // On-device engine (Python + yt-dlp + ffmpeg) ships native code per CPU type.
         ndk {
@@ -29,8 +29,28 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+    // Every version is signed with the same key, so new versions install as updates.
+    // If the GitHub secret VF_KEYSTORE_PASSWORD is set, a private key (signing/videoflow-release.p12) is used instead.
+    signingConfigs {
+        stable {
+            def ksPassword = System.getenv("VF_KEYSTORE_PASSWORD")
+            if (ksPassword && file("../../signing/videoflow-release.p12").exists()) {
+                storeFile file("../../signing/videoflow-release.p12")
+                storePassword ksPassword
+                keyPassword ksPassword
+            } else {
+                storeFile file("../../signing/videoflow-stable.p12")
+                storePassword "android"
+                keyPassword "android"
+            }
+            storeType "pkcs12"
+            keyAlias "videoflow"
+        }
+    }
     buildTypes {
         release {
+            signingConfig signingConfigs.stable
+            debuggable false
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
