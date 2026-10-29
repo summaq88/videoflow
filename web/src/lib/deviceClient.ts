@@ -7,8 +7,8 @@ import { EngineError, PLATFORMS, GENERIC, buildFormat, detectPlatform, friendlyE
 interface NativeResult { name: string; size: number; mime: string; uri: string; path: string }
 interface NativePlugin {
   status(): Promise<{ ready: boolean; version: string; jsRuntime?: boolean; updating?: boolean }>;
-  info(o: { url: string }): Promise<{ json: string; infoPath?: string }>;
-  download(o: { id: string; url: string; format: string; kind: string; container: string; tag: string; attempt: number; infoPath?: string }): Promise<NativeResult>;
+  info(o: { url: string; mode: InfoMode; timeout: number }): Promise<{ json: string; infoPath?: string; mode?: InfoMode }>;
+  download(o: { id: string; url: string; format: string; kind: string; container: string; tag: string; attempt: number; infoPath?: string; mode?: InfoMode }): Promise<NativeResult>;
   getShared(): Promise<{ text: string | null }>;
   stop(o: { id: string; keep: boolean }): Promise<void>;
   update(): Promise<{ status: string; version: string }>;
@@ -19,7 +19,11 @@ interface NativePlugin {
   addListener(ev: 'shared', cb: (e: { text: string }) => void): Promise<PluginListenerHandle>;
 }
 
-const INFO_TIMEOUT_MS = 150_000;
+type InfoMode = 'fast' | 'full';
+// Fast lookup (no JavaScript solving) normally answers in a few seconds; the full one can take minutes on a phone.
+const FAST_TIMEOUT_S = 45;
+const FULL_TIMEOUT_S = 240;
+const SLOW_MSG = 'Reading this video took too long. Check your internet connection and tap Retry.';
 const withTimeout = <T,>(p: Promise<T>, ms: number, msg: string) => new Promise<T>((res, rej) => {
   const t = setTimeout(() => rej(new ApiError('TIMEOUT', msg, 504)), ms);
   p.then((v) => { clearTimeout(t); res(v); }, (e) => { clearTimeout(t); rej(e); });
@@ -56,7 +60,7 @@ class DeviceClient {
   private queue: string[] = [];
   private running = 0;
   private listeners = new Set<(j: Job) => void>();
-  private infoCache = new Map<string, { info: VideoInfo; platform: Platform; at: number; infoPath?: string }>();
+  private infoCache = new Map<string, { info: VideoInfo; platform: Platform; at: number; infoPath?: string; mode: InfoMode }>();
   private inflight = new Map<string, Promise<VideoInfo>>(); // one info lookup per link at a time
   private permAsked = false;
 
@@ -113,22 +117,46 @@ class DeviceClient {
     return { url: normalize(u, platform), platform };
   }
 
+  private async readInfo(url: string, platform: Platform, mode: InfoMode) {
+    const timeout = mode === 'fast' ? FAST_TIMEOUT_S : FULL_TIMEOUT_S;
+    let r: { json: string; infoPath?: string };
+    try {
+      // The native side stops yt-dlp itself at `timeout`; the extra margin here is only a safety net.
+      // (+60 s covers waiting for a background engine update, which is not part of the native timeout.)
+      r = await withTimeout(Native.info({ url, mode, timeout }), (timeout + 60) * 1000, SLOW_MSG);
+    } catch (e) {
+      if ((e as { code?: string })?.code === 'TIMEOUT') throw new ApiError('TIMEOUT', SLOW_MSG, 504);
+      throw wrap(e);
+    }
+    let raw: unknown;
+    try { raw = JSON.parse(r.json); } catch { throw new ApiError('FAILED', 'The website returned data we could not read.', 502); }
+    return { info: summarize(raw, platform), infoPath: r.infoPath, mode };
+  }
+
   private getInfo(url: string, platform: Platform): Promise<VideoInfo> {
     const hit = this.infoCache.get(url);
     if (hit && Date.now() - hit.at < 10 * 60_000) return Promise.resolve(hit.info);
     const running = this.inflight.get(url);
     if (running) return running;
     const p = (async () => {
-      let r: { json: string; infoPath?: string };
-      try {
-        r = await withTimeout(Native.info({ url }), INFO_TIMEOUT_MS,
-          'Reading this video is taking too long. Check your internet and tap Detect again.');
-      } catch (e) { throw wrap(e); }
-      let raw: unknown;
-      try { raw = JSON.parse(r.json); } catch { throw new ApiError('FAILED', 'The website returned data we could not read.', 502); }
-      const info = summarize(raw, platform);
-      this.infoCache.set(url, { info, platform, at: Date.now(), infoPath: r.infoPath });
-      return info;
+      let got: { info: VideoInfo; infoPath?: string; mode: InfoMode } | null = null;
+      let firstErr: ApiError | null = null;
+      const isWeak = (g: typeof got) => !g || !(g.info.maxHeight && g.info.maxHeight > 360);
+      try { got = await this.readInfo(url, platform, 'fast'); } catch (e) { firstErr = wrap(e); }
+      const final = firstErr && ['PRIVATE', 'UNAVAILABLE', 'UNSUPPORTED', 'DRM'].includes(firstErr.code);
+      // YouTube sometimes answers the fast method with 360p only; asking again usually gives the full list.
+      if (platform.id === 'youtube' && got && isWeak(got)) {
+        try { const again = await this.readInfo(url, platform, 'fast'); if (!isWeak(again)) got = again; } catch { /* keep first */ }
+      }
+      // Only when the fast method failed completely, use the full (slow, JavaScript) method.
+      if (platform.id === 'youtube' && !got && !final) {
+        try { got = await this.readInfo(url, platform, 'full'); } catch (e) {
+          if (!got) throw firstErr && firstErr.code !== 'TIMEOUT' ? firstErr : wrap(e);
+        }
+      }
+      if (!got) throw wrap(firstErr);
+      this.infoCache.set(url, { info: got.info, platform, at: Date.now(), infoPath: got.infoPath, mode: got.mode });
+      return got.info;
     })();
     this.inflight.set(url, p);
     p.finally(() => this.inflight.delete(url)).catch(() => {});
@@ -284,6 +312,7 @@ class DeviceClient {
       const r = await Native.download({
         id: j.id, url: j.url, kind: j.kind, container: j.container, tag, attempt: j.strategy,
         infoPath: j.strategy === 0 ? this.infoCache.get(j.url)?.infoPath : undefined,
+        mode: this.infoCache.get(j.url)?.mode || 'fast',
         format: buildFormat({ quality: j.quality, container: j.container, kind: j.kind, clean: j.platformObj.clean }),
       });
       this.update(j, { status: 'completed', progress: 100, speed: null, eta: null, fileName: r.name, fileSize: r.size });
