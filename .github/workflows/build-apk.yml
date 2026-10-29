@@ -1,0 +1,66 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Build web app
+        run: |
+          npm ci
+          npm run build
+
+      - name: Copy web app into Android project
+        run: npx cap sync android
+
+      - name: Build APK
+        working-directory: web/android
+        run: |
+          mkdir -p ../android/capacitor-cordova-android-plugins/src/main/java ../android/capacitor-cordova-android-plugins/src/main/res
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Rename APK
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk ../VideoFlow.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VideoFlow-APK
+          path: VideoFlow.apk
+
+      - name: Publish APK to the "apk" branch (easy download link)
+        run: |
+          cd ..
+          mkdir -p /tmp/apkbranch && cp VideoFlow.apk /tmp/apkbranch/
+          cd /tmp/apkbranch
+          git init -q -b apk
+          git config user.name "github-actions"
+          git config user.email "actions@users.noreply.github.com"
+          git add VideoFlow.apk
+          git commit -qm "VideoFlow APK build ${{ github.run_number }}"
+          git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" apk
