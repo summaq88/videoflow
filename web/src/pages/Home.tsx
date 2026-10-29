@@ -1,15 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from '../lib/settings';
-import { ApiError, findUrls, type AnalyzeResult, type Api, type Health } from '../lib/api';
+import { ApiError, findUrls, type AnalyzeResult, type Api, type Health, type Job } from '../lib/api';
 import { readClipboard } from '../lib/device';
-import { duration } from '../lib/format';
-import { Icon, Modal, Thumb } from '../components/ui';
+import { bytes, duration, eta, speed } from '../lib/format';
+import { Icon, Modal, Progress, Thumb } from '../components/ui';
 
 const PLATFORMS = ['YouTube', 'Instagram', 'TikTok', 'Snapchat', 'Facebook', 'X', 'Pinterest'];
 const BATCH_Q = ['best', '2160', '1440', '1080', '720', '480', '360'];
 
-export default function Home({ client, health, prefill, onPrefillUsed, onQueued }: {
-  client: Api; health: Health | null; prefill: string | null; onPrefillUsed: () => void; onQueued: () => void;
+export default function Home({ client, health, prefill, onPrefillUsed, onQueued, myJobs, onSave }: {
+  client: Api; health: Health | null; prefill: string | null; onPrefillUsed: () => void; onQueued: (ids: string[]) => void;
+  myJobs: Job[]; onSave: (id: string, name: string) => void;
 }) {
   const { s, t, toast } = useApp();
   const [text, setText] = useState('');
@@ -70,9 +71,10 @@ export default function Home({ client, health, prefill, onPrefillUsed, onQueued 
     if (!res) return;
     setSending(true);
     try {
-      await client.download({ url: res.url, kind: audio ? 'audio' : 'video', quality: audio ? 'audio' : quality, container, force });
-      toast(t.added);
-      onQueued();
+      const r = await client.download({ url: res.url, kind: audio ? 'audio' : 'video', quality: audio ? 'audio' : quality, container, force });
+      onQueued([r.job.id]);
+      setRes(null);
+      setText('');
     } catch (e) {
       if (e instanceof ApiError && e.code === 'DUPLICATE') setDupOpen(true);
       else toast(e instanceof Error ? e.message : String(e), 'err');
@@ -87,7 +89,7 @@ export default function Home({ client, health, prefill, onPrefillUsed, onQueued 
       const r = await client.batch({ urls, kind: audio ? 'audio' : 'video', quality: audio ? 'audio' : quality, container });
       const bad = r.results.filter((x) => x.error);
       toast(bad.length ? `${r.results.length - bad.length}/${r.results.length} – ${bad[0].error!.message}` : t.added, bad.length ? 'err' : 'ok');
-      if (bad.length < r.results.length) { setText(''); onQueued(); }
+      if (bad.length < r.results.length) { setText(''); onQueued(r.results.filter((x) => x.job).map((x) => x.job!.id)); }
     } catch (e) {
       toast(e instanceof Error ? e.message : String(e), 'err');
     } finally {
@@ -105,7 +107,7 @@ export default function Home({ client, health, prefill, onPrefillUsed, onQueued 
         <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">{t.appTagline}</p>
       </section>
 
-      {!health && <SetupGuide />}
+      {!health && client.mode === 'server' && <SetupGuide />}
 
       <section className="card p-3 sm:p-4">
         <div className="relative">
@@ -209,6 +211,12 @@ export default function Home({ client, health, prefill, onPrefillUsed, onQueued 
         </section>
       )}
 
+      {!!myJobs.length && (
+        <section className="space-y-2">
+          {myJobs.map((j) => <MiniJob key={j.id} j={j} client={client} onSave={onSave} />)}
+        </section>
+      )}
+
       <Modal open={dupOpen} onClose={() => setDupOpen(false)}>
         <h3 className="text-lg font-semibold">{t.duplicateTitle}</h3>
         <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">{t.duplicateBody}</p>
@@ -295,5 +303,38 @@ function SetupGuide() {
           : 'Next time: open Termux, run  cd ~/videoflow/server && npm start  and open the same address. Or run the server on your PC instead (see README).'}
       </p>
     </section>
+  );
+}
+
+const RUNNING = ['queued', 'analyzing', 'downloading', 'processing'];
+
+/** Compact progress card shown on Home for downloads started in this visit. */
+function MiniJob({ j, client, onSave }: { j: Job; client: Api; onSave: (id: string, name: string) => void }) {
+  const { t, toast } = useApp();
+  const running = RUNNING.includes(j.status);
+  const act = async (a: 'cancel' | 'retry') => {
+    try { await client.action(j.id, a); } catch (e) { toast(e instanceof Error ? e.message : String(e), 'err'); }
+  };
+  return (
+    <div className="card animate-rise p-3">
+      <div className="flex items-center gap-3">
+        <Thumb src={j.thumbnail} kind={j.kind} className="h-12 w-16" />
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-semibold" dir="auto">{j.title || j.url}</p>
+          <p className="text-xs text-slate-500 dark:text-slate-400" dir="auto">
+            {(t as Record<string, unknown>)[j.status] as string}
+            {j.status === 'downloading' && j.progress != null ? ` · ${j.progress.toFixed(0)}%` : ''}
+            {running && j.speed ? ` · ${speed(j.speed)}` : ''}
+            {running && j.eta != null ? ` · ${eta(j.eta)} ${t.eta}` : ''}
+            {j.status === 'completed' && j.fileSize ? ` · ${bytes(j.fileSize)} · ${client.mode === 'device' ? t.inDownloads : t.savedAuto}` : ''}
+          </p>
+        </div>
+        {running && <button className="btn-ghost p-1.5" onClick={() => act('cancel')} aria-label={t.cancel}><Icon name="x" className="h-4 w-4" /></button>}
+        {j.status === 'completed' && <button className="btn-soft px-3 py-1.5 text-xs" onClick={() => onSave(j.id, j.fileName || 'video')}><Icon name={client.mode === 'device' ? 'share' : 'save'} className="h-4 w-4" />{client.mode === 'device' ? t.share : t.saveAgain}</button>}
+        {j.status === 'failed' && <button className="btn-soft px-3 py-1.5 text-xs" onClick={() => act('retry')}><Icon name="retry" className="h-4 w-4" />{t.retry}</button>}
+      </div>
+      {running && <div className="mt-2.5"><Progress value={j.status === 'processing' ? 100 : j.progress} active /></div>}
+      {j.status === 'failed' && j.error && <p className="mt-2 text-xs text-red-600 dark:text-red-400">{j.error}</p>}
+    </div>
   );
 }

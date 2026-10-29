@@ -64,7 +64,7 @@ export default function History({ client, refreshKey, onPlay, onSave, onOpenLink
               <div className="flex shrink-0 flex-col items-end justify-between gap-1">
                 <button className="btn-ghost p-1.5" onClick={() => { setDel(i); setDelFile(false); }} aria-label={t.remove}><Icon name="trash" className="h-4 w-4" /></button>
                 {i.status === 'completed' && i.file_exists ? (
-                  <button className="btn-soft px-2.5 py-1.5" onClick={() => onSave(i.id, i.file_name || 'video')} aria-label={t.save}><Icon name="save" className="h-4 w-4" /></button>
+                  <button className="btn-soft px-2.5 py-1.5" onClick={() => onSave(i.id, i.file_name || 'video')} aria-label={client.mode === 'device' ? t.share : t.save}><Icon name={client.mode === 'device' ? 'share' : 'save'} className="h-4 w-4" /></button>
                 ) : (
                   <button className="btn-soft px-2.5 py-1.5" onClick={() => onOpenLink(i.url)} aria-label={t.retry}><Icon name="retry" className="h-4 w-4" /></button>
                 )}

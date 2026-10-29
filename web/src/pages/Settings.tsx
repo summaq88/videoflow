@@ -2,13 +2,30 @@ import { useState } from 'react';
 import { useApp, sameOrigin, type Theme } from '../lib/settings';
 import { api, type Health } from '../lib/api';
 import { Icon } from '../components/ui';
-import { readClipboard } from '../lib/device';
+import { readClipboard, isNative } from '../lib/device';
 
 export default function SettingsPage({ health, onHealth }: { health: Health | null; onHealth: (h: Health | null) => void }) {
   const { s, set, t, toast } = useApp();
   const [url, setUrl] = useState(s.serverUrl);
   const [token, setToken] = useState(s.token);
   const [testing, setTesting] = useState(false);
+  const [updating, setUpdating] = useState(false);
+  const deviceMode = isNative && s.engine !== 'server';
+
+  async function updateEngine() {
+    setUpdating(true);
+    try {
+      const c = api(s);
+      if (c.mode !== 'device') return;
+      const r = await c.updateEngine();
+      toast(`${t.updated} · yt-dlp ${r.version}`);
+      onHealth(await c.health());
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), 'err');
+    } finally {
+      setUpdating(false);
+    }
+  }
 
   async function test() {
     setTesting(true);
@@ -48,7 +65,22 @@ export default function SettingsPage({ health, onHealth }: { health: Health | nu
     <div className="mx-auto w-full max-w-2xl space-y-4">
       <h1 className="px-1 text-xl font-bold">{t.settings}</h1>
 
-      <section className="card p-4">
+      {isNative && (
+        <section className="card space-y-3 p-4">
+          <h2 className="font-semibold">{t.engineTitle}</h2>
+          <Seg value={s.engine} onChange={(v) => { set({ engine: v }); onHealth(null); }} options={[['device', t.engineDevice], ['server', t.engineServer]]} />
+          {deviceMode && (
+            <>
+              <p className="text-xs text-slate-500">{t.engineDeviceHelp}</p>
+              {health && <p className="text-xs text-slate-500">yt-dlp {health.ytdlp} · ffmpeg ✓</p>}
+              <button className="btn-soft w-full" onClick={updateEngine} disabled={updating}><Icon name="retry" className="h-4 w-4" />{updating ? t.updating : t.updateEngine}</button>
+              <p className="text-xs text-slate-500">{t.updateHelp}</p>
+            </>
+          )}
+        </section>
+      )}
+
+      {!deviceMode && <section className="card p-4">
         <div className="mb-3 flex items-center gap-2">
           <h2 className="me-auto font-semibold">{t.server}</h2>
           <span className={`flex items-center gap-1.5 text-xs font-medium ${health ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-500'}`}>
@@ -68,7 +100,7 @@ export default function SettingsPage({ health, onHealth }: { health: Health | nu
         {health && (
           <p className="mt-3 text-xs text-slate-500">{t.engine}: yt-dlp {health.ytdlp || '—'} · ffmpeg {health.ffmpeg ? '✓' : '✗'}</p>
         )}
-      </section>
+      </section>}
 
       <section className="card divide-y divide-slate-100 px-4 dark:divide-white/[.06]">
         <h2 className="pt-4 pb-1 font-semibold">{t.appearance}</h2>
@@ -91,6 +123,12 @@ export default function SettingsPage({ health, onHealth }: { health: Health | nu
         </Row>
         <Row title={t.defaultFormat}>
           <Seg value={s.defaultContainer} onChange={(v) => set({ defaultContainer: v })} options={[['mp4', 'MP4'], ['webm', 'WebM']]} />
+        </Row>
+        <Row title={t.autoSave} help={t.autoSaveHelp}>
+          <button role="switch" aria-checked={s.autoSave} onClick={() => set({ autoSave: !s.autoSave })}
+            className={`relative h-7 w-12 shrink-0 rounded-full transition ${s.autoSave ? 'bg-brand-500' : 'bg-slate-300 dark:bg-white/15'}`}>
+            <span className={`absolute top-1 h-5 w-5 rounded-full bg-white shadow transition-all ${s.autoSave ? 'start-6' : 'start-1'}`} />
+          </button>
         </Row>
         <Row title={t.clipboard} help={t.clipboardHelp}>
           <button role="switch" aria-checked={s.clipboardWatch}

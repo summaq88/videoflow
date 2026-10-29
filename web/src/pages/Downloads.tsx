@@ -61,7 +61,7 @@ export default function Downloads({ jobs, client, onPlay, onSave }: {
               {j.status === 'completed' && (
                 <>
                   <button className="btn-soft py-1.5" onClick={() => onPlay(j.id, j.title || '', j.kind)}><Icon name="play" className="h-4 w-4" />{t.play}</button>
-                  <button className="btn-primary py-1.5" onClick={() => onSave(j.id, j.fileName || 'video')}><Icon name="save" className="h-4 w-4" />{t.save}</button>
+                  <button className="btn-primary py-1.5" onClick={() => onSave(j.id, j.fileName || 'video')}><Icon name={client.mode === 'device' ? 'share' : 'save'} className="h-4 w-4" />{client.mode === 'device' ? t.share : t.save}</button>
                 </>
               )}
             </div>
