@@ -45,8 +45,11 @@ public class VideoFlowNativePlugin extends Plugin {
     private volatile boolean updating = false;
     private static final long UPDATE_EVERY_MS = 12L * 3600_000L;
 
+    private volatile String pendingShare = null;
+
     @Override
     public void load() {
+        pendingShare = sharedText(getActivity() != null ? getActivity().getIntent() : null);
         pool.execute(() -> {
             try {
                 YoutubeDL.getInstance().init(getContext());
@@ -55,7 +58,7 @@ public class VideoFlowNativePlugin extends Plugin {
                 initError = String.valueOf(e.getMessage());
                 return;
             }
-            // Sites like YouTube change often: keep yt-dlp current automatically (needs internet, runs in background).
+            ready = true; // usable right away; the engine refresh below runs in the background
             android.content.SharedPreferences prefs = getContext().getSharedPreferences("videoflow", Context.MODE_PRIVATE);
             long last = prefs.getLong("lastEngineUpdate", 0);
             if (System.currentTimeMillis() - last > UPDATE_EVERY_MS) {
@@ -69,8 +72,41 @@ public class VideoFlowNativePlugin extends Plugin {
                     updating = false;
                 }
             }
-            ready = true;
         });
+    }
+
+    // ---------- "Share → VideoFlow" from YouTube, TikTok, Instagram… ----------
+
+    private static String sharedText(Intent intent) {
+        if (intent == null) return null;
+        if (Intent.ACTION_SEND.equals(intent.getAction())) {
+            String t = intent.getStringExtra(Intent.EXTRA_TEXT);
+            if (t != null && !t.trim().isEmpty()) return t;
+        }
+        if (Intent.ACTION_VIEW.equals(intent.getAction()) && intent.getData() != null) {
+            return intent.getData().toString();
+        }
+        return null;
+    }
+
+    @Override
+    protected void handleOnNewIntent(Intent intent) {
+        super.handleOnNewIntent(intent);
+        String t = sharedText(intent);
+        if (t != null) {
+            JSObject o = new JSObject();
+            o.put("text", t);
+            notifyListeners("shared", o, true);
+        }
+    }
+
+    /** Text shared to the app when it was launched (returned once). */
+    @PluginMethod
+    public void getShared(PluginCall call) {
+        JSObject o = new JSObject();
+        o.put("text", pendingShare);
+        pendingShare = null;
+        call.resolve(o);
     }
 
     /** Path of the bundled QuickJS interpreter (YouTube needs a JavaScript runtime to unlock video links). */
@@ -84,6 +120,9 @@ public class VideoFlowNativePlugin extends Plugin {
         String qjs = jsRuntime();
         if (qjs != null) req.addOption("--js-runtimes", "quickjs:" + qjs);
         req.addOption("--remote-components", "ejs:github");
+        // Keep yt-dlp's cache (YouTube player code + solved challenges) between runs: much faster after the first video.
+        req.addOption("--cache-dir", new File(getContext().getCacheDir(), "yt-dlp").getAbsolutePath());
+        req.addOption("--socket-timeout", "20");
         req.addOption("--no-playlist");
         if (attempt == 1) req.addOption("--extractor-args", "youtube:player_client=android,tv,web_safari");
         if (attempt >= 2) req.addOption("--extractor-args", "youtube:player_client=tv,web_embedded,mweb");
@@ -108,6 +147,7 @@ public class VideoFlowNativePlugin extends Plugin {
             JSObject r = new JSObject();
             r.put("ready", true);
             r.put("jsRuntime", jsRuntime() != null);
+            r.put("updating", updating);
             try { r.put("version", YoutubeDL.getInstance().versionName(getContext())); } catch (Throwable e) { r.put("version", ""); }
             call.resolve(r);
         });
@@ -125,8 +165,17 @@ public class VideoFlowNativePlugin extends Plugin {
                 req.addOption("--no-warnings");
                 addCommon(req, 0);
                 YoutubeDLResponse res = YoutubeDL.getInstance().execute(req, null, (Function3<Float, Long, String, Unit>) null);
+                String out = res.getOut();
                 JSObject r = new JSObject();
-                r.put("json", res.getOut());
+                r.put("json", out);
+                // Save it so the download can reuse it instead of reading the video page again.
+                try {
+                    File dir = new File(getContext().getCacheDir(), "info");
+                    dir.mkdirs();
+                    File f = new File(dir, Integer.toHexString(url.hashCode()) + ".json");
+                    try (OutputStream os = new java.io.FileOutputStream(f)) { os.write(out.getBytes("UTF-8")); }
+                    r.put("infoPath", f.getAbsolutePath());
+                } catch (Throwable ignored) { }
                 call.resolve(r);
             } catch (Throwable e) {
                 call.reject(String.valueOf(e.getMessage()), "YTDLP");
@@ -149,6 +198,7 @@ public class VideoFlowNativePlugin extends Plugin {
         final String container = call.getString("container", "mp4");
         final String tag = call.getString("tag", "best");
         final int attempt = call.getInt("attempt", 0);
+        final String infoPath = call.getString("infoPath");
         if (id == null || url == null) { call.reject("Missing id or url"); return; }
         call.setKeepAlive(true);
         pool.execute(() -> {
@@ -156,7 +206,11 @@ public class VideoFlowNativePlugin extends Plugin {
             File dir = workDir(id);
             dir.mkdirs();
             try {
-                YoutubeDLRequest req = new YoutubeDLRequest(url);
+                File info = infoPath != null ? new File(infoPath) : null;
+                boolean reuse = attempt == 0 && info != null && info.exists()
+                        && System.currentTimeMillis() - info.lastModified() < 3L * 3600_000L;
+                YoutubeDLRequest req = reuse ? new YoutubeDLRequest(new java.util.ArrayList<String>()) : new YoutubeDLRequest(url);
+                if (reuse) req.addOption("--load-info-json", info.getAbsolutePath());
                 // Last resort: a single-file format (needs no merging and is rarely blocked).
                 req.addOption("-f", attempt >= 2 && !"audio".equals(kind) ? "18/b/" + format : format);
                 addCommon(req, attempt);
