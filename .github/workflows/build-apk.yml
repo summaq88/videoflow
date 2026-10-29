@@ -52,14 +52,10 @@ jobs:
           name: VideoFlow-APK
           path: VideoFlow.apk
 
-      - name: Publish APK to the "apk" branch (easy download link)
+      - name: Publish APK as a GitHub release (easy download link)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cd ..
-          mkdir -p /tmp/apkbranch && cp VideoFlow.apk /tmp/apkbranch/
-          cd /tmp/apkbranch
-          git init -q -b apk
-          git config user.name "github-actions"
-          git config user.email "actions@users.noreply.github.com"
-          git add VideoFlow.apk
-          git commit -qm "VideoFlow APK build ${{ github.run_number }}"
-          git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" apk
+          gh release delete latest-apk --yes --cleanup-tag || true
+          gh release create latest-apk VideoFlow.apk --title "VideoFlow APK" --notes "Build ${{ github.run_number }} – install VideoFlow.apk on Android 7 or newer." --latest
