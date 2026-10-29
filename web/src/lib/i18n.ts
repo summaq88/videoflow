@@ -38,6 +38,13 @@ const en = {
   best: 'Best available', added: 'Added to downloads', by: 'by',
   speed: 'Speed', eta: 'left',
   limits: 'Platform limits',
+  savedAuto: 'saved to your device', saveAgain: 'Save again',
+  share: 'Share', inDownloads: 'saved in Download/VideoFlow', preparing: 'Preparing engine…',
+  engineTitle: 'Download engine', engineDevice: 'On this phone (built-in)', engineServer: 'My own server',
+  engineDeviceHelp: 'Videos are downloaded directly on this phone. No server or setup needed.',
+  updateEngine: 'Update engine', updating: 'Updating…', updated: 'Engine is up to date',
+  updateHelp: 'If a site stops working, update the engine (needs internet).',
+  autoSave: 'Save automatically', autoSaveHelp: 'When a download finishes, the file is saved straight to this device.',
 };
 
 const ar: typeof en = {
@@ -78,6 +85,13 @@ const ar: typeof en = {
   best: 'أفضل جودة متاحة', added: 'أُضيف إلى التنزيلات', by: 'بواسطة',
   speed: 'السرعة', eta: 'متبقٍ',
   limits: 'قيود المنصة',
+  savedAuto: 'تم الحفظ في جهازك', saveAgain: 'حفظ مرة أخرى',
+  share: 'مشاركة', inDownloads: 'محفوظ في Download/VideoFlow', preparing: 'جارٍ تجهيز المحرك…',
+  engineTitle: 'محرك التنزيل', engineDevice: 'على هذا الهاتف (مدمج)', engineServer: 'خادمي الخاص',
+  engineDeviceHelp: 'يتم تنزيل الفيديوهات مباشرة على هذا الهاتف، بدون خادم أو إعداد.',
+  updateEngine: 'تحديث المحرك', updating: 'جارٍ التحديث…', updated: 'المحرك محدّث',
+  updateHelp: 'إذا توقف موقع عن العمل، حدّث المحرك (يحتاج إنترنت).',
+  autoSave: 'الحفظ التلقائي', autoSaveHelp: 'عند انتهاء التنزيل يُحفظ الملف مباشرة في هذا الجهاز.',
 };
 
 export const dict = { en, ar };

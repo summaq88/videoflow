@@ -1,4 +1,6 @@
 import { sameOrigin, injectedToken, type Settings } from './settings';
+import { isNative } from './device';
+import { deviceClient, type DeviceClient } from './deviceClient';
 
 export interface Quality { value: string; label: string }
 export interface VideoInfo {
@@ -41,7 +43,7 @@ export function tokenOf(s: Settings) {
   return sameOrigin ? injectedToken : s.token.trim();
 }
 
-export function api(s: Settings) {
+export function serverApi(s: Settings) {
   const base = baseUrl(s);
   const token = tokenOf(s);
   async function req<T>(path: string, init: { method?: string; body?: unknown; timeoutMs?: number } = {}): Promise<T> {
@@ -69,6 +71,7 @@ export function api(s: Settings) {
   }
   const q = (extra = '') => `${token ? `token=${encodeURIComponent(token)}` : ''}${extra && token ? '&' : ''}${extra}`;
   return {
+    mode: 'server' as const,
     health: () => req<Health>('/api/health', { timeoutMs: 8000 }),
     analyze: (url: string) => req<AnalyzeResult>('/api/analyze', { method: 'POST', body: { url } }),
     download: (b: { url: string; kind: string; quality: string; container: string; force?: boolean }) =>
@@ -84,7 +87,15 @@ export function api(s: Settings) {
     eventsUrl: () => `${base}/api/events?${q()}`,
   };
 }
-export type Api = ReturnType<typeof api>;
+export type ServerApi = ReturnType<typeof serverApi>;
+export type Api = ServerApi | DeviceClient;
+
+/** In the Android app the built-in engine is used (unless the user picked a server); everywhere else, the server. */
+export function api(s: Settings): Api {
+  const forced = (window as unknown as { __vfMock?: unknown }).__vfMock; // automated tests only
+  if ((isNative || forced) && s.engine !== 'server') return deviceClient();
+  return serverApi(s);
+}
 
 /** All http(s) links in pasted text. */
 export function findUrls(text: string): string[] {

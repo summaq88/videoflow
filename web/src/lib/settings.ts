@@ -10,6 +10,8 @@ export interface Settings {
   defaultQuality: string; // 'best' | '1080' | '720' | '480' | '360' | 'audio'
   defaultContainer: 'mp4' | 'webm';
   clipboardWatch: boolean;
+  autoSave: boolean;
+  engine: 'device' | 'server'; // Android app only
 }
 
 const KEY = 'videoflow.settings.v1';
@@ -26,6 +28,8 @@ export const defaultSettings: Settings = {
   defaultQuality: 'best',
   defaultContainer: 'mp4',
   clipboardWatch: false,
+  autoSave: true,
+  engine: 'device',
 };
 
 export function loadSettings(): Settings {
