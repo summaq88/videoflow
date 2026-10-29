@@ -1,4 +1,5 @@
 import { useEffect, type ReactNode } from 'react';
+import { LOGO_URI } from '../lib/logo';
 
 const P = { fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
 const paths: Record<string, ReactNode> = {
@@ -29,17 +30,7 @@ export function Icon({ name, className = 'h-5 w-5' }: { name: keyof typeof paths
 }
 
 export function Logo({ className = 'h-9 w-9' }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 64 64" className={className} aria-hidden>
-      <defs>
-        <linearGradient id="vfg" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stopColor="#6b93ff" /><stop offset="1" stopColor="#3a62f0" />
-        </linearGradient>
-      </defs>
-      <rect width="64" height="64" rx="18" fill="url(#vfg)" />
-      <path d="M32 16v22m0 0-9-9m9 9 9-9M20 46h24" stroke="#fff" strokeWidth="5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
+  return <img src={LOGO_URI} alt="" aria-hidden className={`${className} rounded-[22%] object-cover`} draggable={false} />;
 }
 
 export function Modal({ open, onClose, children, wide = false }: { open: boolean; onClose: () => void; children: ReactNode; wide?: boolean }) {
