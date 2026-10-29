@@ -40,6 +40,7 @@ import kotlin.jvm.functions.Function3;
 public class VideoFlowNativePlugin extends Plugin {
 
     private final ExecutorService pool = Executors.newCachedThreadPool();
+    private final java.util.concurrent.ScheduledExecutorService watchdog = Executors.newSingleThreadScheduledExecutor();
     private volatile boolean ready = false;
     private volatile String initError = null;
     private volatile boolean updating = false;
@@ -115,17 +116,33 @@ public class VideoFlowNativePlugin extends Plugin {
         return qjs.exists() ? qjs.getAbsolutePath() : null;
     }
 
-    /** Options shared by every yt-dlp call. attempt > 0 = fallback strategies after an HTTP 403. */
-    private void addCommon(YoutubeDLRequest req, int attempt) {
+    /**
+     * Options shared by every yt-dlp call.
+     * mode "fast": YouTube's android_vr client, which needs no JavaScript solving (seconds instead of minutes on a phone).
+     * mode "full": YouTube's web/tv clients + QuickJS to solve YouTube's challenge (slow, but works when fast doesn't).
+     * mode "alt":  another set of clients, used as a last resort after an HTTP 403.
+     */
+    private void addCommon(YoutubeDLRequest req, String mode) {
+        req.addOption("--cache-dir", new File(getContext().getCacheDir(), "yt-dlp").getAbsolutePath());
+        req.addOption("--socket-timeout", "15");
+        req.addOption("--no-playlist");
+        if ("fast".equals(mode)) {
+            // visionos = yt-dlp's current no-JavaScript client; android_vr = backup (older engines skip unknown names).
+            req.addOption("--extractor-args", "youtube:player_client=visionos,android_vr");
+            return;
+        }
         String qjs = jsRuntime();
         if (qjs != null) req.addOption("--js-runtimes", "quickjs:" + qjs);
         req.addOption("--remote-components", "ejs:github");
-        // Keep yt-dlp's cache (YouTube player code + solved challenges) between runs: much faster after the first video.
-        req.addOption("--cache-dir", new File(getContext().getCacheDir(), "yt-dlp").getAbsolutePath());
-        req.addOption("--socket-timeout", "20");
-        req.addOption("--no-playlist");
-        if (attempt == 1) req.addOption("--extractor-args", "youtube:player_client=android,tv,web_safari");
-        if (attempt >= 2) req.addOption("--extractor-args", "youtube:player_client=tv,web_embedded,mweb");
+        if ("alt".equals(mode)) req.addOption("--extractor-args", "youtube:player_client=tv,web_embedded,mweb");
+        else req.addOption("--extractor-args", "youtube:player_client=android_vr,tv,web_safari");
+    }
+
+    /** Don't start yt-dlp while the engine update is replacing its files (max ~40 s). */
+    private void waitUpdate() {
+        for (int i = 0; i < 400 && updating; i++) {
+            try { Thread.sleep(100); } catch (InterruptedException ignored) { }
+        }
     }
 
     /** Waits (in a worker thread) until the engine has unpacked itself on first launch. */
@@ -156,29 +173,43 @@ public class VideoFlowNativePlugin extends Plugin {
     @PluginMethod
     public void info(PluginCall call) {
         final String url = call.getString("url");
+        final String mode = call.getString("mode", "fast");
+        final int timeoutSec = call.getInt("timeout", 60);
         if (url == null) { call.reject("Missing url"); return; }
         pool.execute(() -> {
             if (!waitReady(call)) return;
+            waitUpdate();
+            final String pid = "info-" + System.nanoTime();
+            final java.util.concurrent.atomic.AtomicBoolean timedOut = new java.util.concurrent.atomic.AtomicBoolean(false);
+            // Watchdog: really stop yt-dlp when it takes too long (otherwise it keeps running and slows the next try).
+            java.util.concurrent.ScheduledFuture<?> dog = watchdog.schedule(() -> {
+                timedOut.set(true);
+                try { YoutubeDL.getInstance().destroyProcessById(pid); } catch (Throwable ignored) { }
+            }, timeoutSec, java.util.concurrent.TimeUnit.SECONDS);
             try {
                 YoutubeDLRequest req = new YoutubeDLRequest(url);
                 req.addOption("--dump-single-json");
                 req.addOption("--no-warnings");
-                addCommon(req, 0);
-                YoutubeDLResponse res = YoutubeDL.getInstance().execute(req, null, (Function3<Float, Long, String, Unit>) null);
+                addCommon(req, mode);
+                YoutubeDLResponse res = YoutubeDL.getInstance().execute(req, pid, (Function3<Float, Long, String, Unit>) null);
                 String out = res.getOut();
                 JSObject r = new JSObject();
                 r.put("json", out);
+                r.put("mode", mode);
                 // Save it so the download can reuse it instead of reading the video page again.
                 try {
                     File dir = new File(getContext().getCacheDir(), "info");
                     dir.mkdirs();
-                    File f = new File(dir, Integer.toHexString(url.hashCode()) + ".json");
+                    File f = new File(dir, Integer.toHexString(url.hashCode()) + "-" + mode + ".json");
                     try (OutputStream os = new java.io.FileOutputStream(f)) { os.write(out.getBytes("UTF-8")); }
                     r.put("infoPath", f.getAbsolutePath());
                 } catch (Throwable ignored) { }
                 call.resolve(r);
             } catch (Throwable e) {
-                call.reject(String.valueOf(e.getMessage()), "YTDLP");
+                if (timedOut.get() || e instanceof YoutubeDL.CanceledException) call.reject("timed out", "TIMEOUT");
+                else call.reject(String.valueOf(e.getMessage()), "YTDLP");
+            } finally {
+                dog.cancel(false);
             }
         });
     }
@@ -199,10 +230,12 @@ public class VideoFlowNativePlugin extends Plugin {
         final String tag = call.getString("tag", "best");
         final int attempt = call.getInt("attempt", 0);
         final String infoPath = call.getString("infoPath");
+        final String infoMode = call.getString("mode", "fast");
         if (id == null || url == null) { call.reject("Missing id or url"); return; }
         call.setKeepAlive(true);
         pool.execute(() -> {
             if (!waitReady(call)) return;
+            waitUpdate();
             File dir = workDir(id);
             dir.mkdirs();
             try {
@@ -213,7 +246,8 @@ public class VideoFlowNativePlugin extends Plugin {
                 if (reuse) req.addOption("--load-info-json", info.getAbsolutePath());
                 // Last resort: a single-file format (needs no merging and is rarely blocked).
                 req.addOption("-f", attempt >= 2 && !"audio".equals(kind) ? "18/b/" + format : format);
-                addCommon(req, attempt);
+                // attempt 0: same method that read the video; 1: full (JavaScript) method; 2: other clients.
+                addCommon(req, attempt == 0 ? infoMode : attempt == 1 ? ("full".equals(infoMode) ? "alt" : "full") : "alt");
                 req.addOption("-o", dir.getAbsolutePath() + "/%(extractor_key)s_%(title).80B_%(id)s_" + tag + ".%(ext)s");
                 req.addOption("--restrict-filenames");
                 req.addOption("--no-mtime");
