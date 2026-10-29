@@ -28,6 +28,14 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: App icons, splash and in-app logo from branding/image.png
+        run: |
+          python -m pip install --quiet pillow numpy
+          python branding/make_icons.py
 
       - name: Build web app
         run: |
