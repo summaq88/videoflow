@@ -37,15 +37,36 @@ jobs:
       - name: Copy web app into Android project
         run: npx cap sync android
 
-      - name: Build APK
+      - name: Build QuickJS (JavaScript engine yt-dlp needs for YouTube)
         working-directory: web/android
         run: |
-          mkdir -p ../android/capacitor-cordova-android-plugins/src/main/java ../android/capacitor-cordova-android-plugins/src/main/res
-          chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon
+          NDK="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
+          echo "Using NDK: $NDK"
+          git clone --depth 1 --branch v0.10.1 https://github.com/quickjs-ng/quickjs.git /tmp/qjs \
+            || git clone --depth 1 https://github.com/quickjs-ng/quickjs.git /tmp/qjs
+          for abi in arm64-v8a armeabi-v7a; do
+            cmake -S /tmp/qjs -B /tmp/qjs-$abi -G "Unix Makefiles" \
+              -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+              -DANDROID_ABI=$abi -DANDROID_PLATFORM=android-24 \
+              -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
+            cmake --build /tmp/qjs-$abi -j 4
+            QJS=$(find /tmp/qjs-$abi -maxdepth 2 -type f -name qjs | head -n 1)
+            test -n "$QJS"
+            mkdir -p app/src/main/jniLibs/$abi
+            cp "$QJS" app/src/main/jniLibs/$abi/libqjs.so
+            "$NDK"/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip app/src/main/jniLibs/$abi/libqjs.so || true
+            file app/src/main/jniLibs/$abi/libqjs.so
+          done
 
-      - name: Rename APK
-        run: cp android/app/build/outputs/apk/debug/app-debug.apk ../VideoFlow.apk
+      - name: Build release APK
+        working-directory: web/android
+        env:
+          VF_KEYSTORE_PASSWORD: ${{ secrets.VF_KEYSTORE_PASSWORD }}
+        run: |
+          mkdir -p capacitor-cordova-android-plugins/src/main/java capacitor-cordova-android-plugins/src/main/res
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+          cp app/build/outputs/apk/release/app-release.apk ../../VideoFlow.apk
 
       - uses: actions/upload-artifact@v4
         with:
