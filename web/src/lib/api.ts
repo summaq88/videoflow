@@ -14,6 +14,7 @@ export interface AnalyzeResult {
   platform: { id: string; name: string; notes: string };
   info: VideoInfo;
   alreadyDownloaded: { id: string; fileName: string } | null;
+  partial?: boolean; // quick preview; full details still loading
 }
 export type Status = 'queued' | 'analyzing' | 'downloading' | 'processing' | 'completed' | 'failed' | 'canceled' | 'paused' | 'skipped';
 export interface Job {

@@ -1,21 +1,29 @@
 // On-device client for the Android app: same interface as the server client,
 // but downloads run inside the phone through the VideoFlowNative plugin (yt-dlp + ffmpeg).
-import { registerPlugin, type PluginListenerHandle } from '@capacitor/core';
+import { CapacitorHttp, registerPlugin, type PluginListenerHandle } from '@capacitor/core';
 import { ApiError, findUrls, type AnalyzeResult, type Health, type HistoryItem, type Job, type VideoInfo } from './api';
 import { EngineError, PLATFORMS, GENERIC, buildFormat, detectPlatform, friendlyError, normalize, parseUrl, summarize, type Platform } from './engine';
 
 interface NativeResult { name: string; size: number; mime: string; uri: string; path: string }
 interface NativePlugin {
-  status(): Promise<{ ready: boolean; version: string; jsRuntime?: boolean }>;
-  info(o: { url: string }): Promise<{ json: string }>;
-  download(o: { id: string; url: string; format: string; kind: string; container: string; tag: string; attempt: number }): Promise<NativeResult>;
+  status(): Promise<{ ready: boolean; version: string; jsRuntime?: boolean; updating?: boolean }>;
+  info(o: { url: string }): Promise<{ json: string; infoPath?: string }>;
+  download(o: { id: string; url: string; format: string; kind: string; container: string; tag: string; attempt: number; infoPath?: string }): Promise<NativeResult>;
+  getShared(): Promise<{ text: string | null }>;
   stop(o: { id: string; keep: boolean }): Promise<void>;
   update(): Promise<{ status: string; version: string }>;
   open(o: { uri: string; mime: string }): Promise<void>;
   share(o: { uri: string; mime: string }): Promise<void>;
   remove(o: { uri: string }): Promise<void>;
   addListener(ev: 'progress', cb: (e: { id: string; progress: number; eta: number; processing: boolean; line: string }) => void): Promise<PluginListenerHandle>;
+  addListener(ev: 'shared', cb: (e: { text: string }) => void): Promise<PluginListenerHandle>;
 }
+
+const INFO_TIMEOUT_MS = 150_000;
+const withTimeout = <T,>(p: Promise<T>, ms: number, msg: string) => new Promise<T>((res, rej) => {
+  const t = setTimeout(() => rej(new ApiError('TIMEOUT', msg, 504)), ms);
+  p.then((v) => { clearTimeout(t); res(v); }, (e) => { clearTimeout(t); rej(e); });
+});
 // `web` is only used for automated UI tests (window.__vfMock); the real engine is the Android plugin.
 const Native = registerPlugin<NativePlugin>('VideoFlowNative', {
   web: () => (window as unknown as { __vfMock?: NativePlugin }).__vfMock as NativePlugin,
@@ -48,7 +56,8 @@ class DeviceClient {
   private queue: string[] = [];
   private running = 0;
   private listeners = new Set<(j: Job) => void>();
-  private infoCache = new Map<string, { info: VideoInfo; platform: Platform; at: number }>();
+  private infoCache = new Map<string, { info: VideoInfo; platform: Platform; at: number; infoPath?: string }>();
+  private inflight = new Map<string, Promise<VideoInfo>>(); // one info lookup per link at a time
   private permAsked = false;
 
   constructor() {
@@ -104,22 +113,81 @@ class DeviceClient {
     return { url: normalize(u, platform), platform };
   }
 
-  private async getInfo(url: string, platform: Platform): Promise<VideoInfo> {
+  private getInfo(url: string, platform: Platform): Promise<VideoInfo> {
     const hit = this.infoCache.get(url);
-    if (hit && Date.now() - hit.at < 10 * 60_000) return hit.info;
-    let json: string;
-    try { json = (await Native.info({ url })).json; } catch (e) { throw wrap(e); }
-    let raw: unknown;
-    try { raw = JSON.parse(json); } catch { throw new ApiError('FAILED', 'The website returned data we could not read.', 502); }
-    const info = summarize(raw, platform);
-    this.infoCache.set(url, { info, platform, at: Date.now() });
-    return info;
+    if (hit && Date.now() - hit.at < 10 * 60_000) return Promise.resolve(hit.info);
+    const running = this.inflight.get(url);
+    if (running) return running;
+    const p = (async () => {
+      let r: { json: string; infoPath?: string };
+      try {
+        r = await withTimeout(Native.info({ url }), INFO_TIMEOUT_MS,
+          'Reading this video is taking too long. Check your internet and tap Detect again.');
+      } catch (e) { throw wrap(e); }
+      let raw: unknown;
+      try { raw = JSON.parse(r.json); } catch { throw new ApiError('FAILED', 'The website returned data we could not read.', 502); }
+      const info = summarize(raw, platform);
+      this.infoCache.set(url, { info, platform, at: Date.now(), infoPath: r.infoPath });
+      return info;
+    })();
+    this.inflight.set(url, p);
+    p.finally(() => this.inflight.delete(url)).catch(() => {});
+    return p;
   }
 
-  private findDuplicate(key: string | null | undefined, kind: string, quality: string, container: string) {
+  /**
+   * Instant preview (title + thumbnail in about a second) from the site's public oEmbed endpoint,
+   * shown while the full video info is still loading. Returns null when the site has no oEmbed.
+   */
+  async preview(input: string): Promise<AnalyzeResult | null> {
+    let url: string; let platform: Platform;
+    try { ({ url, platform } = await this.resolve(input)); } catch (e) { throw wrap(e); }
+    const hit = this.infoCache.get(url);
+    if (hit) return this.result(url, platform, hit.info);
+    const endpoint = platform.id === 'youtube' ? 'https://www.youtube.com/oembed?format=json&url='
+      : platform.id === 'tiktok' ? 'https://www.tiktok.com/oembed?url=' : null;
+    if (!endpoint) return null;
+    try {
+      const r = await withTimeout(CapacitorHttp.get({ url: endpoint + encodeURIComponent(url), connectTimeout: 8000, readTimeout: 8000 }), 9000, 'timeout');
+      if (r.status !== 200) return null;
+      const d = (typeof r.data === 'string' ? JSON.parse(r.data) : r.data) as { title?: string; author_name?: string; thumbnail_url?: string };
+      if (!d?.title) return null;
+      const id = platform.id === 'youtube' ? new URL(url).searchParams.get('v') : (url.match(/\/video\/(\d+)/) || [])[1];
+      const extractor = platform.id === 'youtube' ? 'Youtube' : 'TikTok';
+      const std = ['1080', '720', '480', '360'];
+      const info: VideoInfo = {
+        id: id || '', extractor, videoKey: id ? `${extractor.toLowerCase()}:${id}` : '', title: d.title, uploader: d.author_name || null,
+        duration: null, thumbnail: d.thumbnail_url || null, webpageUrl: url, isLive: false, maxHeight: null,
+        qualities: [{ value: 'best', label: 'Best available' }, ...std.map((q) => ({ value: q, label: q === '1080' ? '1080p Full HD' : q === '720' ? '720p HD' : `${q}p` }))],
+        containers: ['mp4', 'webm'], audio: true, watermarkFreeAvailable: null, hasWatermarkedVariant: false,
+      };
+      return { ...this.result(url, platform, info), partial: true } as AnalyzeResult;
+    } catch {
+      return null;
+    }
+  }
+
+  private result(url: string, platform: Platform, info: VideoInfo): AnalyzeResult {
+    const dup = info.videoKey ? loadHistory().find((h) => h.video_key === info.videoKey && h.status === 'completed') : null;
+    return {
+      url, platform: { id: platform.id, name: platform.name, notes: platform.notes }, info,
+      alreadyDownloaded: dup ? { id: dup.id, fileName: dup.file_name || '' } : null,
+    };
+  }
+
+  /** Link shared to VideoFlow from another app (Android share sheet). */
+  async takeShared(): Promise<string | null> {
+    try { return (await Native.getShared()).text || null; } catch { return null; }
+  }
+
+  onShared(cb: (text: string) => void) {
+    void Native.addListener('shared', (e) => e?.text && cb(e.text));
+  }
+
+  private findDuplicate(key: string | null | undefined, kind: string, quality: string, container: string, exceptId?: string) {
     if (!key) return null;
     for (const j of this.jobMap.values()) {
-      if (j.videoKey === key && j.kind === kind && j.quality === quality && j.container === container && ACTIVE.includes(j.status)) return j;
+      if (j.id !== exceptId && j.videoKey === key && j.kind === kind && j.quality === quality && j.container === container && ACTIVE.includes(j.status)) return j;
     }
     return loadHistory().find((h) => h.video_key === key && h.kind === kind && h.quality === quality && h.container === container && h.status === 'completed') || null;
   }
@@ -128,11 +196,7 @@ class DeviceClient {
     try {
       const { url, platform } = await this.resolve(input);
       const info = await this.getInfo(url, platform);
-      const dup = loadHistory().find((h) => h.video_key === info.videoKey && h.status === 'completed');
-      return {
-        url, platform: { id: platform.id, name: platform.name, notes: platform.notes }, info,
-        alreadyDownloaded: dup ? { id: dup.id, fileName: dup.file_name || '' } : null,
-      };
+      return this.result(url, platform, info);
     } catch (e) { throw wrap(e); }
   }
 
@@ -209,7 +273,7 @@ class DeviceClient {
         const info = await this.getInfo(j.url, j.platformObj);
         Object.assign(j, { info, videoKey: info.videoKey, title: info.title, uploader: info.uploader, thumbnail: info.thumbnail, duration: info.duration });
         if (j.status !== 'analyzing') return;
-        if (!j.force && this.findDuplicate(info.videoKey, j.kind, j.quality, j.container)) {
+        if (!j.force && this.findDuplicate(info.videoKey, j.kind, j.quality, j.container, j.id)) {
           this.update(j, { status: 'skipped', error: 'Already downloaded in this quality (duplicate skipped).', errorCode: 'DUPLICATE' });
           return;
         }
@@ -219,6 +283,7 @@ class DeviceClient {
       const tag = j.kind === 'audio' ? 'audio' : (j.quality === 'best' ? 'best' : `${j.quality}p`);
       const r = await Native.download({
         id: j.id, url: j.url, kind: j.kind, container: j.container, tag, attempt: j.strategy,
+        infoPath: j.strategy === 0 ? this.infoCache.get(j.url)?.infoPath : undefined,
         format: buildFormat({ quality: j.quality, container: j.container, kind: j.kind, clean: j.platformObj.clean }),
       });
       this.update(j, { status: 'completed', progress: 100, speed: null, eta: null, fileName: r.name, fileSize: r.size });
