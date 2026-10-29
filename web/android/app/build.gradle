@@ -7,14 +7,27 @@ android {
         applicationId "com.videoflow.app"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        versionCode 2
+        versionName "2.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        // On-device engine (Python + yt-dlp + ffmpeg) ships native code per CPU type.
+        ndk {
+            abiFilters 'armeabi-v7a', 'arm64-v8a'
+        }
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
              // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
             ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
+    }
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging true   // youtubedl-android needs its native libraries extracted
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
     }
     buildTypes {
         release {
@@ -40,6 +53,10 @@ dependencies {
     androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
     androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
     implementation project(':capacitor-cordova-android-plugins')
+    // On-device download engine: yt-dlp + Python + ffmpeg
+    implementation "io.github.junkfood02.youtubedl-android:library:0.18.1"
+    implementation "io.github.junkfood02.youtubedl-android:ffmpeg:0.18.1"
+    implementation "org.jetbrains.kotlin:kotlin-stdlib:2.0.21"
 }
 
 apply from: 'capacitor.build.gradle'
