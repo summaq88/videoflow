@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">VideoFlow</string>
+    <string name="title_activity_main">VideoFlow</string>
+    <string name="package_name">com.videoflow.app</string>
+    <string name="custom_url_scheme">com.videoflow.app</string>
+</resources>
