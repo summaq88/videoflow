@@ -15,11 +15,26 @@ interface NativePlugin {
   open(o: { uri: string; mime: string }): Promise<void>;
   share(o: { uri: string; mime: string }): Promise<void>;
   remove(o: { uri: string }): Promise<void>;
+  accounts(): Promise<Record<string, boolean>>;
+  login(o: { site: string }): Promise<Record<string, boolean> & { signedIn: boolean }>;
+  logout(o: { site: string }): Promise<Record<string, boolean>>;
   addListener(ev: 'progress', cb: (e: { id: string; progress: number; eta: number; processing: boolean; line: string }) => void): Promise<PluginListenerHandle>;
   addListener(ev: 'shared', cb: (e: { text: string }) => void): Promise<PluginListenerHandle>;
 }
 
 type InfoMode = 'fast' | 'full';
+
+export interface PlatformCheck { platform: string; url: string; state: 'running' | 'ok' | 'fail'; seconds?: number; detail?: string }
+// Public test videos (from yt-dlp's own test suite), one per supported platform.
+export const PLATFORM_CHECKS: PlatformCheck[] = [
+  { platform: 'YouTube', url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', state: 'running' },
+  { platform: 'Instagram', url: 'https://www.instagram.com/reel/Chunk8-jurw/', state: 'running' },
+  { platform: 'TikTok', url: 'https://www.tiktok.com/@leenabhushan/video/6748451240264420610', state: 'running' },
+  { platform: 'Facebook', url: 'https://www.facebook.com/radiokicksfm/videos/3676516585958356/', state: 'running' },
+  { platform: 'X / Twitter', url: 'https://x.com/captainamerica/status/719944021058060289', state: 'running' },
+  { platform: 'Pinterest', url: 'https://www.pinterest.com/pin/664281013778109217/', state: 'running' },
+  { platform: 'Snapchat', url: 'https://www.snapchat.com/spotlight/W7_EDlXWTBiXAEEniNoMPwAAYYWtidGhudGZpAX1TKn0JAX1TKnXJAAAAAA', state: 'running' },
+];
 // Fast lookup (no JavaScript solving) normally answers in a few seconds; the full one can take minutes on a phone.
 const FAST_TIMEOUT_S = 45;
 const FULL_TIMEOUT_S = 240;
@@ -46,11 +61,11 @@ const toBytes = (n: string, u: string) => Number(n) * (UNITS[u] || 1);
 
 type Live = Job & { videoKey: string | null; platformObj: Platform; info: VideoInfo | null; attempts: number; force: boolean; strategy: number };
 
-function wrap(e: unknown): ApiError {
+function wrap(e: unknown, platformId = ''): ApiError {
   if (e instanceof ApiError) return e;
   if (e instanceof EngineError) return new ApiError(e.code, e.message, 422);
   const msg = (e as { message?: string })?.message || String(e);
-  const fe = friendlyError(msg);
+  const fe = friendlyError(msg, platformId);
   return new ApiError(fe.code, fe.message, 422);
 }
 
@@ -111,6 +126,45 @@ class DeviceClient {
     try { return await Native.update(); } catch (e) { throw wrap(e); }
   }
 
+  // ---- Accounts: sign in to a site so videos it shows only to signed-in users work ----
+  async accounts(): Promise<Record<string, boolean>> {
+    try { return await Native.accounts(); } catch { return {}; }
+  }
+
+  async login(site: string): Promise<boolean> {
+    const r = await Native.login({ site });
+    this.infoCache.clear(); // links that failed before may work now
+    return !!r.signedIn;
+  }
+
+  async logout(site: string): Promise<Record<string, boolean>> {
+    const r = await Native.logout({ site });
+    this.infoCache.clear();
+    return r;
+  }
+
+  /** Reads one public test video per platform on this phone and reports the result of each. */
+  async checkPlatforms(onResult: (r: PlatformCheck) => void): Promise<PlatformCheck[]> {
+    const out: PlatformCheck[] = [];
+    for (const c of PLATFORM_CHECKS) {
+      onResult({ ...c, state: 'running' });
+      const t0 = Date.now();
+      let r: PlatformCheck;
+      try {
+        this.infoCache.delete(c.url);
+        const { url, platform } = await this.resolve(c.url);
+        this.infoCache.delete(url);
+        const info = await this.getInfo(url, platform);
+        r = { ...c, state: 'ok', seconds: (Date.now() - t0) / 1000, detail: info.maxHeight ? `${info.maxHeight}p` : 'OK' };
+      } catch (e) {
+        r = { ...c, state: 'fail', seconds: (Date.now() - t0) / 1000, detail: wrap(e).message };
+      }
+      out.push(r);
+      onResult(r);
+    }
+    return out;
+  }
+
   private async resolve(input: string) {
     const u = parseUrl(input);
     const platform = detectPlatform(u);
@@ -126,7 +180,7 @@ class DeviceClient {
       r = await withTimeout(Native.info({ url, mode, timeout }), (timeout + 60) * 1000, SLOW_MSG);
     } catch (e) {
       if ((e as { code?: string })?.code === 'TIMEOUT') throw new ApiError('TIMEOUT', SLOW_MSG, 504);
-      throw wrap(e);
+      throw wrap(e, platform.id);
     }
     let raw: unknown;
     try { raw = JSON.parse(r.json); } catch { throw new ApiError('FAILED', 'The website returned data we could not read.', 502); }
@@ -143,7 +197,7 @@ class DeviceClient {
       let firstErr: ApiError | null = null;
       const isWeak = (g: typeof got) => !g || !(g.info.maxHeight && g.info.maxHeight > 360);
       try { got = await this.readInfo(url, platform, 'fast'); } catch (e) { firstErr = wrap(e); }
-      const final = firstErr && ['PRIVATE', 'UNAVAILABLE', 'UNSUPPORTED', 'DRM'].includes(firstErr.code);
+      const final = firstErr && (['PRIVATE', 'UNAVAILABLE', 'UNSUPPORTED', 'DRM'].includes(firstErr.code) || firstErr.code.startsWith('SIGN_IN'));
       // YouTube sometimes answers the fast method with 360p only; asking again usually gives the full list.
       if (platform.id === 'youtube' && got && isWeak(got)) {
         try { const again = await this.readInfo(url, platform, 'fast'); if (!isWeak(again)) got = again; } catch { /* keep first */ }

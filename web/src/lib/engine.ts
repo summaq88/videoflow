@@ -6,7 +6,7 @@ export interface Platform { id: string; name: string; hosts: string[]; notes: st
 
 export const PLATFORMS: Platform[] = [
   { id: 'youtube', name: 'YouTube', hosts: ['youtube.com', 'youtu.be', 'youtube-nocookie.com'], notes: 'Public videos and Shorts. Private, members-only and paid (DRM) videos cannot be downloaded.' },
-  { id: 'instagram', name: 'Instagram', hosts: ['instagram.com', 'instagr.am'], notes: 'Public Reels, videos and posts. Private accounts and Stories that need a login are not supported.' },
+  { id: 'instagram', name: 'Instagram', hosts: ['instagram.com', 'instagr.am'], notes: 'Public Reels, videos and posts. Age-restricted reels: sign in to Instagram in Settings → Accounts. Private accounts are not supported.' },
   { id: 'tiktok', name: 'TikTok', hosts: ['tiktok.com'], notes: 'Public videos. The platform’s own clean playback file is used when TikTok provides it.', clean: '[format_note!*=watermark]' },
   { id: 'snapchat', name: 'Snapchat', hosts: ['snapchat.com'], notes: 'Public Spotlight videos and public Stories only.' },
   { id: 'facebook', name: 'Facebook', hosts: ['facebook.com', 'fb.watch', 'fb.com'], notes: 'Public videos and Reels.' },
@@ -104,8 +104,15 @@ export function buildFormat({ quality = 'best', container = 'mp4', kind = 'video
   return [...new Set(parts)].join('/');
 }
 
-export function friendlyError(msg = ''): EngineError {
+/** Sites where VideoFlow can sign in (Settings → Accounts) to open videos shown only to signed-in users. */
+export const SIGN_IN_SITES: Record<string, string> = { instagram: 'Instagram', facebook: 'Facebook', x: 'X / Twitter' };
+
+export function friendlyError(msg = '', platformId = ''): EngineError {
   const s = msg.toLowerCase();
+  const site = SIGN_IN_SITES[platformId];
+  if (site && /isn't available to everyone|can't be seen by certain audiences|age.?restrict|only available for registered users|login required|log in|sign in|restricted|rate-limit reached|requested content is not available|nsfw|sensitive/.test(s)) {
+    return new EngineError(`SIGN_IN:${platformId}`, `${site} only shows this video to signed-in users (age-restricted or limited audience). Sign in to ${site} in VideoFlow, then try again.`);
+  }
   if (/drm|widevine/.test(s)) return new EngineError('DRM', 'This video is DRM-protected. Protected content cannot be downloaded.');
   if (/private video|this account is private|is private|protected tweet/.test(s)) return new EngineError('PRIVATE', 'This video is private. Only public videos can be downloaded.');
   if (/sign in|log ?in|login required|cookies|not a bot|rate-limit/.test(s)) return new EngineError('LOGIN_REQUIRED', 'The platform asked for a login or bot check for this video. Try again later, or try Settings → Update engine.');
