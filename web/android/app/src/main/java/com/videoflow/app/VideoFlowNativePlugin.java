@@ -16,7 +16,10 @@ import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
+import com.getcapacitor.annotation.ActivityCallback;
 import com.getcapacitor.annotation.CapacitorPlugin;
+import androidx.activity.result.ActivityResult;
+import android.webkit.CookieManager;
 import com.yausername.ffmpeg.FFmpeg;
 import com.yausername.youtubedl_android.YoutubeDL;
 import com.yausername.youtubedl_android.YoutubeDLRequest;
@@ -59,6 +62,7 @@ public class VideoFlowNativePlugin extends Plugin {
                 initError = String.valueOf(e.getMessage());
                 return;
             }
+            try { writeCookies(); } catch (Throwable ignored) { }
             ready = true; // usable right away; the engine refresh below runs in the background
             android.content.SharedPreferences prefs = getContext().getSharedPreferences("videoflow", Context.MODE_PRIVATE);
             long last = prefs.getLong("lastEngineUpdate", 0);
@@ -110,6 +114,112 @@ public class VideoFlowNativePlugin extends Plugin {
         call.resolve(o);
     }
 
+    // ---------- Sign in (only for videos the site shows to signed-in users, e.g. age-restricted reels) ----------
+
+    /** id, name, sign-in page, page whose cookies we read, session cookie, cookie domain */
+    private static final String[][] SITES = {
+            {"instagram", "Instagram", "https://www.instagram.com/accounts/login/", "https://www.instagram.com/", "sessionid", ".instagram.com"},
+            {"facebook", "Facebook", "https://m.facebook.com/login/", "https://www.facebook.com/", "c_user", ".facebook.com"},
+            {"x", "X / Twitter", "https://x.com/i/flow/login", "https://x.com/", "auth_token", ".x.com"},
+    };
+
+    private static String[] site(String id) {
+        for (String[] s : SITES) if (s[0].equals(id)) return s;
+        return null;
+    }
+
+    private File cookiesFile() { return new File(getContext().getFilesDir(), "cookies.txt"); }
+
+    private static boolean hasSession(String all, String name) {
+        if (all == null) return false;
+        for (String part : all.split(";")) {
+            String kv = part.trim();
+            if (kv.startsWith(name + "=") && kv.length() > name.length() + 1 && !kv.endsWith("=\"\"")) return true;
+        }
+        return false;
+    }
+
+    private boolean signedIn(String[] s) {
+        try { return hasSession(CookieManager.getInstance().getCookie(s[3]), s[4]); } catch (Throwable e) { return false; }
+    }
+
+    /** Writes the signed-in sites' cookies in the Netscape format yt-dlp reads (no file when nobody is signed in). */
+    private synchronized void writeCookies() {
+        StringBuilder b = new StringBuilder("# Netscape HTTP Cookie File\n");
+        long exp = System.currentTimeMillis() / 1000 + 180L * 86400L;
+        boolean any = false;
+        for (String[] s : SITES) {
+            String all;
+            try { all = CookieManager.getInstance().getCookie(s[3]); } catch (Throwable e) { continue; }
+            if (!hasSession(all, s[4])) continue;
+            any = true;
+            for (String part : all.split(";")) {
+                String kv = part.trim();
+                int eq = kv.indexOf('=');
+                if (eq <= 0) continue;
+                b.append(s[5]).append("\tTRUE\t/\tTRUE\t").append(exp).append('\t')
+                        .append(kv.substring(0, eq)).append('\t').append(kv.substring(eq + 1)).append('\n');
+            }
+        }
+        File f = cookiesFile();
+        if (!any) { f.delete(); return; }
+        try (OutputStream os = new java.io.FileOutputStream(f)) { os.write(b.toString().getBytes("UTF-8")); } catch (Throwable ignored) { }
+    }
+
+    private JSObject accountsJson() {
+        JSObject r = new JSObject();
+        for (String[] s : SITES) r.put(s[0], signedIn(s));
+        return r;
+    }
+
+    @PluginMethod
+    public void accounts(PluginCall call) {
+        call.resolve(accountsJson());
+    }
+
+    @PluginMethod
+    public void login(PluginCall call) {
+        String[] s = site(call.getString("site", ""));
+        if (s == null) { call.reject("Unknown site"); return; }
+        Intent i = new Intent(getContext(), LoginActivity.class);
+        i.putExtra(LoginActivity.EXTRA_URL, s[2]);
+        i.putExtra(LoginActivity.EXTRA_HOME, s[3]);
+        i.putExtra(LoginActivity.EXTRA_COOKIE, s[4]);
+        i.putExtra(LoginActivity.EXTRA_TITLE, "Sign in to " + s[1]);
+        startActivityForResult(call, i, "loginDone");
+    }
+
+    @ActivityCallback
+    private void loginDone(PluginCall call, ActivityResult result) {
+        if (call == null) return;
+        writeCookies();
+        JSObject r = accountsJson();
+        String[] s = site(call.getString("site", ""));
+        r.put("signedIn", s != null && signedIn(s));
+        call.resolve(r);
+    }
+
+    @PluginMethod
+    public void logout(PluginCall call) {
+        String[] s = site(call.getString("site", ""));
+        if (s == null) { call.reject("Unknown site"); return; }
+        CookieManager cm = CookieManager.getInstance();
+        String all = cm.getCookie(s[3]);
+        if (all != null) {
+            for (String part : all.split(";")) {
+                String kv = part.trim();
+                int eq = kv.indexOf('=');
+                if (eq <= 0) continue;
+                String name = kv.substring(0, eq);
+                cm.setCookie(s[3], name + "=; Max-Age=0; Path=/; Domain=" + s[5]);
+                cm.setCookie(s[3], name + "=; Max-Age=0; Path=/");
+            }
+        }
+        cm.flush();
+        writeCookies();
+        call.resolve(accountsJson());
+    }
+
     /** Path of the bundled QuickJS interpreter (YouTube needs a JavaScript runtime to unlock video links). */
     private String jsRuntime() {
         File qjs = new File(getContext().getApplicationInfo().nativeLibraryDir, "libqjs.so");
@@ -126,6 +236,7 @@ public class VideoFlowNativePlugin extends Plugin {
         req.addOption("--cache-dir", new File(getContext().getCacheDir(), "yt-dlp").getAbsolutePath());
         req.addOption("--socket-timeout", "15");
         req.addOption("--no-playlist");
+        if (cookiesFile().exists()) req.addOption("--cookies", cookiesFile().getAbsolutePath());
         if ("fast".equals(mode)) {
             // visionos = yt-dlp's current no-JavaScript client; android_vr = backup (older engines skip unknown names).
             req.addOption("--extractor-args", "youtube:player_client=visionos,android_vr");
