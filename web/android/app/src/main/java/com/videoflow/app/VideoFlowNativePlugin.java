@@ -452,8 +452,13 @@ public class VideoFlowNativePlugin extends Plugin {
                 req.addOption("--restrict-filenames");
                 req.addOption("--no-mtime");
                 req.addOption("--newline");
-                req.addOption("--retries", "5");
-                req.addOption("--fragment-retries", "5");
+                // Short Wi-Fi / mobile-data drops (DNS "Errno 7", resets): wait 1, 2, 4… up to 20 s between tries
+                // instead of failing within a second, and keep the partial file so the next try resumes.
+                req.addOption("--retries", "10");
+                req.addOption("--fragment-retries", "10");
+                req.addOption("--retry-sleep", "http:exp=1:20");
+                req.addOption("--retry-sleep", "fragment:exp=1:20");
+                req.addOption("--continue");
                 if ("audio".equals(kind)) {
                     req.addOption("-x");
                     req.addOption("--audio-format", "mp3");
