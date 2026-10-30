@@ -1,8 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useApp, sameOrigin, type Theme } from '../lib/settings';
 import { api, type Health } from '../lib/api';
 import { Icon } from '../components/ui';
 import { readClipboard, isNative } from '../lib/device';
+import { SIGN_IN_SITES } from '../lib/engine';
+import type { PlatformCheck } from '../lib/deviceClient';
 
 export default function SettingsPage({ health, onHealth }: { health: Health | null; onHealth: (h: Health | null) => void }) {
   const { s, set, t, toast } = useApp();
@@ -11,6 +13,37 @@ export default function SettingsPage({ health, onHealth }: { health: Health | nu
   const [testing, setTesting] = useState(false);
   const [updating, setUpdating] = useState(false);
   const deviceMode = isNative && s.engine !== 'server';
+  const onDevice = api(s).mode === 'device'; // the on-phone engine is in use (also true in automated tests)
+  const [accounts, setAccounts] = useState<Record<string, boolean>>({});
+  const [checks, setChecks] = useState<PlatformCheck[]>([]);
+  const [checking, setChecking] = useState(false);
+
+  useEffect(() => {
+    const c = api(s);
+    if (c.mode === 'device') void c.accounts().then(setAccounts);
+  }, [onDevice]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function toggleAccount(site: string) {
+    const c = api(s);
+    if (c.mode !== 'device') return;
+    try {
+      if (accounts[site]) setAccounts(await c.logout(site));
+      else { const ok = await c.login(site); setAccounts(await c.accounts()); toast(ok ? t.signedInAs : t.notSignedIn, ok ? 'ok' : 'err'); }
+    } catch (e) { toast(e instanceof Error ? e.message : String(e), 'err'); }
+  }
+
+  async function runChecks() {
+    const c = api(s);
+    if (c.mode !== 'device') return;
+    setChecking(true); setChecks([]);
+    try {
+      await c.checkPlatforms((r) => setChecks((prev) => {
+        const i = prev.findIndex((p) => p.url === r.url);
+        if (i < 0) return [...prev, r];
+        const n = prev.slice(); n[i] = r; return n;
+      }));
+    } finally { setChecking(false); }
+  }
 
   async function updateEngine() {
     setUpdating(true);
@@ -80,6 +113,40 @@ export default function SettingsPage({ health, onHealth }: { health: Health | nu
         </section>
       )}
 
+      {onDevice && (
+        <section className="card divide-y divide-slate-100 px-4 dark:divide-white/[.06]">
+          <div className="pt-4 pb-2"><h2 className="font-semibold">{t.accounts}</h2><p className="mt-0.5 text-xs text-slate-500">{t.accountsHelp}</p></div>
+          {Object.entries(SIGN_IN_SITES).map(([id, name]) => (
+            <Row key={id} title={name} help={accounts[id] ? t.signedInAs : undefined}>
+              <button className={accounts[id] ? 'btn-soft' : 'btn-primary'} onClick={() => toggleAccount(id)}>
+                <Icon name="user" className="h-4 w-4" />{accounts[id] ? t.signOut : t.signIn}
+              </button>
+            </Row>
+          ))}
+        </section>
+      )}
+
+      {onDevice && (
+        <section className="card space-y-3 p-4">
+          <h2 className="font-semibold">{t.platformTest}</h2>
+          <p className="text-xs text-slate-500">{t.platformTestHelp}</p>
+          <button className="btn-soft w-full" onClick={runChecks} disabled={checking}><Icon name="check" className="h-4 w-4" />{checking ? t.testRunning : t.platformTest}</button>
+          {checks.length > 0 && (
+            <ul className="space-y-2 text-sm">
+              {checks.map((c) => (
+                <li key={c.url} className="flex items-start gap-2">
+                  <span className={`mt-0.5 h-4 w-4 shrink-0 rounded-full ${c.state === 'ok' ? 'bg-emerald-500' : c.state === 'fail' ? 'bg-red-500' : 'animate-pulse bg-slate-300'}`} />
+                  <div className="min-w-0 flex-1">
+                    <p className="font-medium">{c.platform} {c.seconds != null && <span className="font-normal text-slate-500">· {c.seconds.toFixed(1)} s</span>}</p>
+                    {c.detail && <p className={`text-xs ${c.state === 'fail' ? 'text-red-600 dark:text-red-400' : 'text-slate-500'}`}>{c.detail}</p>}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      )}
+
       {!deviceMode && <section className="card p-4">
         <div className="mb-3 flex items-center gap-2">
           <h2 className="me-auto font-semibold">{t.server}</h2>
@@ -143,7 +210,7 @@ export default function SettingsPage({ health, onHealth }: { health: Health | nu
       </section>
 
       <section className="card flex gap-3 p-4 text-xs text-slate-500">
-        <Icon name="alert" className="h-5 w-5 shrink-0" /><p>VideoFlow 1.0 · {t.about}</p>
+        <Icon name="alert" className="h-5 w-5 shrink-0" /><p>VideoFlow 2.5 · {t.about}</p>
       </section>
     </div>
   );

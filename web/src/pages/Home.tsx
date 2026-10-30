@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from '../lib/settings';
 import { ApiError, findUrls, type AnalyzeResult, type Api, type Health, type Job } from '../lib/api';
 import { readClipboard } from '../lib/device';
+import { SIGN_IN_SITES } from '../lib/engine';
 import { bytes, duration, eta, speed } from '../lib/format';
 import { Icon, Modal, Progress, Thumb } from '../components/ui';
 
@@ -24,6 +25,7 @@ export default function Home({ client, health, prefill, onPrefillUsed, onQueued,
   const [dupOpen, setDupOpen] = useState(false);
   const [refining, setRefining] = useState(false);
   const [refineNote, setRefineNote] = useState<string | null>(null);
+  const [signInSite, setSignInSite] = useState<string | null>(null); // site to sign in to after a SIGN_IN error
   const detectId = useRef(0);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -56,12 +58,34 @@ export default function Home({ client, health, prefill, onPrefillUsed, onQueued,
     }
   }
 
+  function noteSignIn(e: unknown) {
+    if (e instanceof ApiError && e.code.startsWith('SIGN_IN:')) setSignInSite(e.code.slice(8));
+  }
+
+  async function signInAndRetry() {
+    const site = signInSite;
+    if (!site || client.mode !== 'device') return;
+    try {
+      const ok = await client.login(site);
+      if (ok) { toast(t.signedIn); void detect(); }
+      else toast(t.notSignedIn, 'err');
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), 'err');
+    }
+  }
+
+  const signInButton = signInSite && (
+    <button className="btn-primary mt-3 w-full" onClick={signInAndRetry}>
+      <Icon name="user" className="h-4 w-4" />{t.signInTo} {SIGN_IN_SITES[signInSite] || signInSite}
+    </button>
+  );
+
   async function detect(value = text) {
     const list = findUrls(value);
     if (!list.length) { setError(t.placeholder); return; }
     if (list.length > 1) return; // batch mode shows its own card
     const reqId = ++detectId.current;
-    setBusy(true); setError(null); setRes(null); setRefining(false); setRefineNote(null);
+    setBusy(true); setError(null); setRes(null); setRefining(false); setRefineNote(null); setSignInSite(null);
     try {
       // Android app: show title + thumbnail instantly, load exact qualities in the background.
       if (client.mode === 'device') {
@@ -74,7 +98,7 @@ export default function Home({ client, health, prefill, onPrefillUsed, onQueued,
             setRefining(true);
             client.analyze(list[0])
               .then((full) => { if (reqId === detectId.current) setRes(full); })
-              .catch((e) => { if (reqId === detectId.current) setRefineNote(e instanceof ApiError ? e.message : String(e)); })
+              .catch((e) => { if (reqId === detectId.current) { setRefineNote(e instanceof ApiError ? e.message : String(e)); noteSignIn(e); } })
               .finally(() => { if (reqId === detectId.current) setRefining(false); });
           }
           return;
@@ -83,7 +107,7 @@ export default function Home({ client, health, prefill, onPrefillUsed, onQueued,
       const full = await client.analyze(list[0]);
       if (reqId === detectId.current) setRes(full);
     } catch (e) {
-      if (reqId === detectId.current) setError(e instanceof ApiError ? e.message : String(e));
+      if (reqId === detectId.current) { setError(e instanceof ApiError ? e.message : String(e)); noteSignIn(e); }
     } finally {
       if (reqId === detectId.current) setBusy(false);
     }
@@ -171,7 +195,8 @@ export default function Home({ client, health, prefill, onPrefillUsed, onQueued,
 
       {error && (
         <div className="card flex animate-rise items-start gap-3 border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-500/20 dark:bg-red-500/10 dark:text-red-300">
-          <Icon name="alert" className="mt-0.5 h-5 w-5 shrink-0" /><p>{error}</p>
+          <Icon name="alert" className="mt-0.5 h-5 w-5 shrink-0" />
+          <div className="min-w-0 flex-1"><p>{error}</p>{signInButton}<p className={signInSite ? 'mt-2 text-xs opacity-80' : 'hidden'}>{t.signInPrivacy}</p></div>
         </div>
       )}
 
@@ -211,7 +236,7 @@ export default function Home({ client, health, prefill, onPrefillUsed, onQueued,
               {refining && (
                 <p className="mt-2 flex items-center gap-1.5 text-xs text-slate-500"><span className="h-3 w-3 animate-spin rounded-full border-2 border-slate-300 border-t-brand-500" />{t.checkingQualities}</p>
               )}
-              {!refining && refineNote && <p className="mt-2 text-xs text-amber-600">{refineNote}</p>}
+              {!refining && refineNote && <><p className="mt-2 text-xs text-amber-600">{refineNote}</p>{signInButton}</>}
               {res.alreadyDownloaded && (
                 <p className="mt-2 flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400"><Icon name="check" className="h-4 w-4" />{t.alreadyHave}</p>
               )}
