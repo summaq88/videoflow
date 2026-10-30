@@ -9,7 +9,7 @@ export const PLATFORMS: Platform[] = [
   { id: 'instagram', name: 'Instagram', hosts: ['instagram.com', 'instagr.am'], notes: 'Public Reels, videos and posts. Age-restricted reels: sign in to Instagram in Settings → Accounts. Private accounts are not supported.' },
   { id: 'tiktok', name: 'TikTok', hosts: ['tiktok.com'], notes: 'Public videos. The platform’s own clean playback file is used when TikTok provides it.', clean: '[format_note!*=watermark]' },
   { id: 'snapchat', name: 'Snapchat', hosts: ['snapchat.com'], notes: 'Public Spotlight videos and public Stories only.' },
-  { id: 'facebook', name: 'Facebook', hosts: ['facebook.com', 'fb.watch', 'fb.com'], notes: 'Public videos and Reels.' },
+  { id: 'facebook', name: 'Facebook', hosts: ['facebook.com', 'fb.watch', 'fb.com'], notes: 'Videos, Reels, Watch, posts and group videos (incl. share links). Private or group videos: sign in to Facebook in Settings → Accounts; you can download what your account can watch.' },
   { id: 'x', name: 'X / Twitter', hosts: ['x.com', 'twitter.com'], notes: 'Public posts with video.' },
   { id: 'pinterest', name: 'Pinterest', hosts: ['pinterest.com', 'pin.it'], notes: 'Video Pins.' },
 ];
@@ -35,12 +35,18 @@ export function detectPlatform(u: URL): Platform {
   return PLATFORMS.find((p) => p.hosts.some((d) => h === d || h.endsWith('.' + d))) || GENERIC;
 }
 
+/** Short share links that redirect to the real post (resolved on the phone before reading the video). */
+export function isShortLink(u: URL): boolean {
+  const h = u.hostname.toLowerCase();
+  return h === 'fb.watch' || h.endsWith('.fb.watch') || ((h.endsWith('facebook.com') || h.endsWith('fb.com')) && u.pathname.startsWith('/share/'));
+}
+
 export function normalize(u: URL, p: Platform): string {
   const out = new URL(u.href);
   for (const k of [...out.searchParams.keys()]) {
     if (p.id === 'youtube' && ['v', 't', 'list'].includes(k)) continue;
-    if (p.id === 'facebook' && ['v', 'story_fbid', 'id'].includes(k)) continue;
-    if (/^(utm_|fbclid|gclid|igsh|igshid|si$|feature$|_r$|_t$|is_from_webapp|sender_device|share_|ref)/i.test(k)) out.searchParams.delete(k);
+    if (p.id === 'facebook' && ['v', 'story_fbid', 'id', 'fbid', 'set'].includes(k)) continue;
+    if (/^(utm_|fbclid|gclid|igsh|igshid|si$|feature$|_r$|_t$|is_from_webapp|sender_device|share_|ref|mibextid|rdid|__cft__|__tn__|paipv|eav|_rdr|comment_id|notif_)/i.test(k)) out.searchParams.delete(k);
   }
   if (p.id === 'youtube') {
     const s = out.pathname.match(/^\/shorts\/([\w-]{6,})/);
@@ -107,9 +113,17 @@ export function buildFormat({ quality = 'best', container = 'mp4', kind = 'video
 /** Sites where VideoFlow can sign in (Settings → Accounts) to open videos shown only to signed-in users. */
 export const SIGN_IN_SITES: Record<string, string> = { instagram: 'Instagram', facebook: 'Facebook', x: 'X / Twitter' };
 
-export function friendlyError(msg = '', platformId = ''): EngineError {
+export function friendlyError(msg = '', platformId = '', signedIn = false): EngineError {
   const s = msg.toLowerCase();
   const site = SIGN_IN_SITES[platformId];
+  // Facebook hides private and group videos behind its login page; yt-dlp then reports "cannot parse data" / "no video formats".
+  const fbHidden = platformId === 'facebook' && /cannot parse data|no video formats found|unsupported url|unable to extract|registered users|log in|login/.test(s);
+  if (fbHidden && signedIn) {
+    return new EngineError('NO_ACCESS', 'Your Facebook account cannot open this video. It may be shared only with people you are not connected to, from a group you are not in, deleted, or the link is not a video. Open it in the Facebook app to check, then copy the link again.');
+  }
+  if (fbHidden) {
+    return new EngineError('SIGN_IN:facebook', 'Facebook did not show this video publicly. If it is a private or group video that you can watch, sign in to Facebook in VideoFlow, then try again.');
+  }
   if (site && /isn't available to everyone|can't be seen by certain audiences|age.?restrict|only available for registered users|login required|log in|sign in|restricted|rate-limit reached|requested content is not available|nsfw|sensitive/.test(s)) {
     return new EngineError(`SIGN_IN:${platformId}`, `${site} only shows this video to signed-in users (age-restricted or limited audience). Sign in to ${site} in VideoFlow, then try again.`);
   }

@@ -2,7 +2,7 @@
 // but downloads run inside the phone through the VideoFlowNative plugin (yt-dlp + ffmpeg).
 import { CapacitorHttp, registerPlugin, type PluginListenerHandle } from '@capacitor/core';
 import { ApiError, findUrls, type AnalyzeResult, type Health, type HistoryItem, type Job, type VideoInfo } from './api';
-import { EngineError, PLATFORMS, GENERIC, buildFormat, detectPlatform, friendlyError, normalize, parseUrl, summarize, type Platform } from './engine';
+import { EngineError, PLATFORMS, GENERIC, buildFormat, detectPlatform, friendlyError, isShortLink, normalize, parseUrl, summarize, type Platform } from './engine';
 
 interface NativeResult { name: string; size: number; mime: string; uri: string; path: string }
 interface NativePlugin {
@@ -18,6 +18,7 @@ interface NativePlugin {
   accounts(): Promise<Record<string, boolean>>;
   login(o: { site: string }): Promise<Record<string, boolean> & { signedIn: boolean }>;
   logout(o: { site: string }): Promise<Record<string, boolean>>;
+  resolve(o: { url: string }): Promise<{ url: string; loginWall: boolean }>;
   addListener(ev: 'progress', cb: (e: { id: string; progress: number; eta: number; processing: boolean; line: string }) => void): Promise<PluginListenerHandle>;
   addListener(ev: 'shared', cb: (e: { text: string }) => void): Promise<PluginListenerHandle>;
 }
@@ -61,11 +62,11 @@ const toBytes = (n: string, u: string) => Number(n) * (UNITS[u] || 1);
 
 type Live = Job & { videoKey: string | null; platformObj: Platform; info: VideoInfo | null; attempts: number; force: boolean; strategy: number };
 
-function wrap(e: unknown, platformId = ''): ApiError {
+function wrap(e: unknown, platformId = '', signedIn = false): ApiError {
   if (e instanceof ApiError) return e;
   if (e instanceof EngineError) return new ApiError(e.code, e.message, 422);
   const msg = (e as { message?: string })?.message || String(e);
-  const fe = friendlyError(msg, platformId);
+  const fe = friendlyError(msg, platformId, signedIn);
   return new ApiError(fe.code, fe.message, 422);
 }
 
@@ -127,18 +128,23 @@ class DeviceClient {
   }
 
   // ---- Accounts: sign in to a site so videos it shows only to signed-in users work ----
+  private signed: Record<string, boolean> = {};
+
   async accounts(): Promise<Record<string, boolean>> {
-    try { return await Native.accounts(); } catch { return {}; }
+    try { this.signed = await Native.accounts(); } catch { /* keep last */ }
+    return this.signed;
   }
 
   async login(site: string): Promise<boolean> {
     const r = await Native.login({ site });
+    this.signed = { ...this.signed, [site]: !!r.signedIn };
     this.infoCache.clear(); // links that failed before may work now
     return !!r.signedIn;
   }
 
   async logout(site: string): Promise<Record<string, boolean>> {
     const r = await Native.logout({ site });
+    this.signed = r;
     this.infoCache.clear();
     return r;
   }
@@ -165,8 +171,23 @@ class DeviceClient {
     return out;
   }
 
+  private shortCache = new Map<string, string>();
+
   private async resolve(input: string) {
-    const u = parseUrl(input);
+    let u = parseUrl(input);
+    // Facebook's "Copy link" gives short links (facebook.com/share/v/…, fb.watch/…): follow them to the real post first.
+    if (isShortLink(u)) {
+      const key = u.href;
+      let real = this.shortCache.get(key);
+      if (!real) {
+        try {
+          const r = await withTimeout(Native.resolve({ url: key }), 25_000, 'timeout');
+          real = r.url;
+          if (real && !isShortLink(new URL(real))) this.shortCache.set(key, real);
+        } catch { /* fall back to the short link */ }
+      }
+      if (real) { try { u = parseUrl(real); } catch { /* keep short */ } }
+    }
     const platform = detectPlatform(u);
     return { url: normalize(u, platform), platform };
   }
@@ -180,7 +201,7 @@ class DeviceClient {
       r = await withTimeout(Native.info({ url, mode, timeout }), (timeout + 60) * 1000, SLOW_MSG);
     } catch (e) {
       if ((e as { code?: string })?.code === 'TIMEOUT') throw new ApiError('TIMEOUT', SLOW_MSG, 504);
-      throw wrap(e, platform.id);
+      throw wrap(e, platform.id, !!this.signed[platform.id]);
     }
     let raw: unknown;
     try { raw = JSON.parse(r.json); } catch { throw new ApiError('FAILED', 'The website returned data we could not read.', 502); }
