@@ -128,7 +128,8 @@ public class VideoFlowNativePlugin extends Plugin {
         return null;
     }
 
-    private File cookiesFile() { return new File(getContext().getFilesDir(), "cookies.txt"); }
+    // No-backup folder: the sign-in never leaves the phone, not even in a cloud backup.
+    private File cookiesFile() { return new File(getContext().getNoBackupFilesDir(), "cookies.txt"); }
 
     private static boolean hasSession(String all, String name) {
         if (all == null) return false;
@@ -218,6 +219,94 @@ public class VideoFlowNativePlugin extends Plugin {
         cm.flush();
         writeCookies();
         call.resolve(accountsJson());
+    }
+
+    // ---------- Short share links (facebook.com/share/v|r|p/…, fb.watch/…) ----------
+
+    private static final String MOBILE_UA = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36";
+
+    private static boolean isShortLink(String u) {
+        try {
+            java.net.URL x = new java.net.URL(u);
+            String h = x.getHost().toLowerCase(Locale.ROOT);
+            return h.endsWith("fb.watch") || ((h.endsWith("facebook.com") || h.endsWith("fb.com")) && x.getPath().startsWith("/share/"));
+        } catch (Throwable e) { return false; }
+    }
+
+    /** The real post behind a login wall's "next=" parameter. */
+    private static String loginNext(String u) {
+        try {
+            String q = new java.net.URL(u).getQuery();
+            if (q == null) return null;
+            for (String kv : q.split("&")) if (kv.startsWith("next=")) return java.net.URLDecoder.decode(kv.substring(5), "UTF-8");
+        } catch (Throwable ignored) { }
+        return null;
+    }
+
+    private static String metaUrl(String html) {
+        String[] pats = {"<link rel=\"canonical\" href=\"([^\"]+)\"", "property=\"og:url\" content=\"([^\"]+)\"", "content=\"([^\"]+)\" property=\"og:url\""};
+        for (String p : pats) {
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile(p).matcher(html);
+            if (m.find()) return m.group(1).replace("&amp;", "&");
+        }
+        return null;
+    }
+
+    /**
+     * Follows a short share link to the real video/post address, using this phone's own Facebook
+     * sign-in (if any). Nothing is sent anywhere except to Facebook itself.
+     */
+    @PluginMethod
+    public void resolve(PluginCall call) {
+        final String start = call.getString("url");
+        if (start == null) { call.reject("Missing url"); return; }
+        pool.execute(() -> {
+            String cur = start;
+            boolean loginWall = false;
+            try {
+                for (int i = 0; i < 6 && isShortLink(cur); i++) {
+                    java.net.HttpURLConnection c = (java.net.HttpURLConnection) new java.net.URL(cur).openConnection();
+                    c.setInstanceFollowRedirects(false);
+                    c.setConnectTimeout(10000);
+                    c.setReadTimeout(10000);
+                    c.setRequestProperty("User-Agent", MOBILE_UA);
+                    c.setRequestProperty("Accept-Language", "en-US,en;q=0.9");
+                    String ck = null;
+                    try { ck = CookieManager.getInstance().getCookie(cur); } catch (Throwable ignored) { }
+                    if (ck != null) c.setRequestProperty("Cookie", ck);
+                    int code = c.getResponseCode();
+                    String loc = c.getHeaderField("Location");
+                    if (code >= 300 && code < 400 && loc != null) {
+                        c.disconnect();
+                        String next = new java.net.URL(new java.net.URL(cur), loc).toString();
+                        if (next.contains("/login") || next.contains("/checkpoint")) {
+                            loginWall = true;
+                            String n = loginNext(next);
+                            if (n == null) break;
+                            next = n;
+                        }
+                        cur = next;
+                        continue;
+                    }
+                    if (code == 200) { // some share pages answer with the post itself: read its canonical address
+                        StringBuilder b = new StringBuilder();
+                        try (InputStream in = c.getInputStream()) {
+                            byte[] buf = new byte[16384];
+                            int n;
+                            while ((n = in.read(buf)) > 0 && b.length() < 600_000) b.append(new String(buf, 0, n, "UTF-8"));
+                        }
+                        String m = metaUrl(b.toString());
+                        if (m != null && !isShortLink(m)) cur = m;
+                    }
+                    c.disconnect();
+                    break;
+                }
+            } catch (Throwable ignored) { }
+            JSObject r = new JSObject();
+            r.put("url", cur);
+            r.put("loginWall", loginWall);
+            call.resolve(r);
+        });
     }
 
     /** Path of the bundled QuickJS interpreter (YouTube needs a JavaScript runtime to unlock video links). */
