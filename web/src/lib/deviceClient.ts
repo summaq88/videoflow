@@ -25,6 +25,20 @@ interface NativePlugin {
 
 type InfoMode = 'fast' | 'full';
 
+// Waits before an automatic retry after a connection problem (seconds 3, 10, 30, 60).
+const NET_RETRY_DELAYS = [3000, 10000, 30000, 60000];
+/** Waits `ms`, and if the phone is offline, keeps waiting (max 3 min) until it is back online. */
+function waitOnline(ms: number): Promise<void> {
+  return new Promise((res) => {
+    setTimeout(() => {
+      if (typeof navigator === 'undefined' || navigator.onLine !== false) { res(); return; }
+      const done = () => { window.removeEventListener('online', done); clearTimeout(t); res(); };
+      const t = setTimeout(done, 180_000);
+      window.addEventListener('online', done);
+    }, ms);
+  });
+}
+
 export interface PlatformCheck { platform: string; url: string; state: 'running' | 'ok' | 'fail'; seconds?: number; detail?: string }
 // Public test videos (from yt-dlp's own test suite), one per supported platform.
 export const PLATFORM_CHECKS: PlatformCheck[] = [
@@ -386,7 +400,8 @@ class DeviceClient {
       const tag = j.kind === 'audio' ? 'audio' : (j.quality === 'best' ? 'best' : `${j.quality}p`);
       const r = await Native.download({
         id: j.id, url: j.url, kind: j.kind, container: j.container, tag, attempt: j.strategy,
-        infoPath: j.strategy === 0 ? this.infoCache.get(j.url)?.infoPath : undefined,
+        // After a failed try, read the video again: its server links may have changed or expired.
+        infoPath: j.strategy === 0 && j.attempts === 0 ? this.infoCache.get(j.url)?.infoPath : undefined,
         mode: this.infoCache.get(j.url)?.mode || 'fast',
         format: buildFormat({ quality: j.quality, container: j.container, kind: j.kind, clean: j.platformObj.clean }),
       });
@@ -404,11 +419,13 @@ class DeviceClient {
         return;
       }
       const w = wrap(e);
-      if (w.code === 'NETWORK' && j.attempts < 2) {
+      // Connection drops: retry by itself (waiting for the phone to be back online); the partial file is kept and resumed.
+      if (w.code === 'NETWORK' && j.attempts < NET_RETRY_DELAYS.length) {
+        const delay = NET_RETRY_DELAYS[j.attempts];
         j.attempts++;
-        this.update(j, { status: 'queued', error: `Retrying (${j.attempts}/2)…` });
-        await new Promise((res) => setTimeout(res, 1500 * j.attempts));
-        if (j.status === 'queued') this.queue.push(j.id);
+        this.update(j, { status: 'queued', error: `Connection problem – retrying automatically (${j.attempts}/${NET_RETRY_DELAYS.length})…`, speed: null, eta: null });
+        await waitOnline(delay);
+        if (j.status === 'queued') { this.queue.push(j.id); this.pump(); }
         return;
       }
       this.update(j, { status: 'failed', error: w.message, errorCode: w.code, speed: null, eta: null });

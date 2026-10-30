@@ -134,6 +134,10 @@ export function friendlyError(msg = '', platformId = '', signedIn = false): Engi
   if (/unsupported url/.test(s)) return new EngineError('UNSUPPORTED', 'This website or link type is not supported.');
   if (/no video formats|no video could be found|there is no video|requested format is not available/.test(s)) return new EngineError('NO_VIDEO', 'No downloadable video was found at this link (or not in the chosen quality).');
   if (/video unavailable|has been removed|not available|404|does not exist|deleted/.test(s)) return new EngineError('UNAVAILABLE', 'This video is unavailable – it may have been deleted or blocked in your region.');
+  // DNS / connection drops while downloading (e.g. "[Errno 7] No address associated with hostname" when Wi-Fi or data blips).
+  if (/errno 7\b|no address associated with hostname|name or service not known|getaddrinfo|nodename nor servname|network is unreachable|errno 101|connection reset|errno 104|remote end closed|incompleteread|read timed out/.test(s)) {
+    return new EngineError('NETWORK', 'The internet connection dropped while downloading. Check Wi-Fi or mobile data, then tap Retry (the download continues where it stopped).');
+  }
   if (/timed out|timeout|connection|network|temporary failure|unable to resolve|ssl/.test(s)) return new EngineError('NETWORK', 'Network problem. Check your internet and try again.');
   const last = msg.trim().split('\n').filter((l) => /error/i.test(l)).pop() || msg.split('\n')[0] || '';
   return new EngineError('FAILED', `Could not process this video. ${last.replace(/^ERROR:\s*/i, '').slice(0, 200)}`.trim());
