@@ -1,0 +1,42 @@
+name: Platform test
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['web/tests/**', '.github/workflows/platform-test.yml']
+  schedule:
+    - cron: '17 3 * * 1'   # every Monday: catch sites that changed
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web/tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Install latest yt-dlp (same engine the app updates to)
+        run: python -m pip install --quiet -U "yt-dlp[default]"
+      - name: Check every platform
+        run: python platform_test.py platform-urls.json results.json | tee results.txt
+      - name: Summary
+        run: |
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat results.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish results
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view platform-test >/dev/null 2>&1 || gh release create platform-test --title "Platform test results" --notes "Latest automatic platform check." --prerelease
+          gh release upload platform-test results.json results.txt --clobber
