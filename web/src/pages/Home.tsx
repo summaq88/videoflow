@@ -388,6 +388,7 @@ function MiniJob({ j, client, onSave }: { j: Job; client: Api; onSave: (id: stri
       </div>
       {running && <div className="mt-2.5"><Progress value={j.status === 'processing' ? 100 : j.progress} active /></div>}
       {j.status === 'failed' && j.error && <p className="mt-2 text-xs text-red-600 dark:text-red-400">{j.error}</p>}
+      {j.status === 'queued' && j.error && <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">{j.error}</p>}
     </div>
   );
 }

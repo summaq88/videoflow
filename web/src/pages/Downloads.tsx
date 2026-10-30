@@ -49,6 +49,7 @@ export default function Downloads({ jobs, client, onPlay, onSave }: {
             {(j.status === 'failed' || j.status === 'skipped') && j.error && (
               <p className="mt-2 flex items-start gap-1.5 text-xs text-red-600 dark:text-red-400"><Icon name="alert" className="mt-px h-4 w-4 shrink-0" />{j.error}</p>
             )}
+            {j.status === 'queued' && j.error && <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">{j.error}</p>}
 
             <div className="mt-3 flex flex-wrap items-center justify-end gap-1.5">
               {!active && j.status !== 'paused' && (

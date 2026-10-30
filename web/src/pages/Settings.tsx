@@ -210,7 +210,7 @@ export default function SettingsPage({ health, onHealth }: { health: Health | nu
       </section>
 
       <section className="card flex gap-3 p-4 text-xs text-slate-500">
-        <Icon name="alert" className="h-5 w-5 shrink-0" /><p>VideoFlow 2.6 · {t.about}</p>
+        <Icon name="alert" className="h-5 w-5 shrink-0" /><p>VideoFlow 2.7 · {t.about}</p>
       </section>
     </div>
   );
